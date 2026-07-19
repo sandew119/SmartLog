@@ -1,0 +1,55 @@
+{
+  "project_info": {
+    "project_number": "426376339171",
+    "firebase_url": "https://smart-log-a7a8b-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "smart-log-a7a8b",
+    "storage_bucket": "smart-log-a7a8b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:426376339171:android:1d0d64837f81b849242fd6",
+        "android_client_info": {
+          "package_name": "com.example.smartlog2"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "426376339171-6ceeb8jqfrjnoqvcjjde60sce2jspan5.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.smartlog2",
+            "certificate_hash": "edc5939d27bc3a6f83c4cb1ef012318b7f3fb87c"
+          }
+        },
+        {
+          "client_id": "426376339171-lhv4607m6i72k21vv9bisdklvumkfmrg.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBVDoBN9v4S6WK8v8SpFPGPEk7XdkhAnSo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "426376339171-lhv4607m6i72k21vv9bisdklvumkfmrg.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "426376339171-s6eleq3tiu700k7pp4pd89upcu59ijq9.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.smartlog2"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
