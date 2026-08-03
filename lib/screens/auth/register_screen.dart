@@ -53,18 +53,58 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Account created successfully"),
-          backgroundColor: Colors.green,
-        ),
-      );
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) {
+          return AlertDialog(
+            icon: const Icon(
+              Icons.check_circle,
+              color: Colors.green,
+              size: 60,
+            ),
+            title: const Text(
+              "Account Created!",
+              textAlign: TextAlign.center,
+            ),
+            content: const Text(
+              "Your SmartLog account has been created successfully.\n\n"
+              "Would you like to verify your email now?\n\n"
+              "You can continue to the dashboard and verify your email later from your profile.",
+              textAlign: TextAlign.center,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(dialogContext);
 
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => const EmailVerificationScreen(),
-        ),
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          const EmailVerificationScreen(),
+                    ),
+                  );
+                },
+                child: const Text("Verify Now"),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () {
+                  Navigator.pop(dialogContext);
+
+                  Navigator.of(context).popUntil(
+                    (route) => route.isFirst,
+                  );
+                },
+                child: const Text("I'll Verify Later"),
+              ),
+            ],
+          );
+        },
       );
     } catch (e) {
       if (!mounted) return;
@@ -84,7 +124,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
     }
   }
 
-  InputDecoration decoration(String label, IconData icon) {
+  InputDecoration decoration(
+    String label,
+    IconData icon,
+  ) {
     return InputDecoration(
       labelText: label,
       prefixIcon: Icon(icon),
@@ -114,7 +157,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-
                 const Icon(
                   Icons.person_add_alt_1,
                   size: 90,
@@ -142,9 +184,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   ),
                 ),
 
-                const SizedBox(height: 35),
-
-                TextFormField(
+                const SizedBox(height: 35),               
+                 TextFormField(
                   controller: _nameController,
                   decoration: decoration(
                     "Full Name",

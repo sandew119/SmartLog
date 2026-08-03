@@ -89,29 +89,49 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> googleLogin() async {
-    setState(() => googleLoading = true);
+ Future<void> googleLogin() async {
+  setState(() => googleLoading = true);
 
-    try {
-      await GoogleAuthService.instance.signIn();
+  try {
+    await GoogleAuthService.instance.signIn();
 
-      await LocalStorageService.setRememberMe(true);
+    await LocalStorageService.setRememberMe(true);
 
-      if (!mounted) return;
+    if (!mounted) return;
 
-      Navigator.pop(context);
-    } catch (e) {
-      if (!mounted) return;
+    Navigator.pop(context);
+  } catch (e) {
+    if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString())),
-      );
+    String message = e.toString();
+
+    if (message.contains("network") ||
+        message.contains("Network") ||
+        message.contains("Socket") ||
+        message.contains("Unable to resolve host")) {
+      message =
+          "No internet connection. Please check your network and try again.";
+    } else if (message.contains("cancel")) {
+      message = "Google Sign-In was cancelled.";
+    } else if (message.contains("10:")) {
+      message =
+          "Google Sign-In configuration error. Please contact support.";
+    } else {
+      message = "Google Sign-In failed.\n$message";
     }
 
-    if (mounted) {
-      setState(() => googleLoading = false);
-    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+      ),
+    );
   }
+
+  if (mounted) {
+    setState(() => googleLoading = false);
+  }
+}
 
   InputDecoration input(
     String label,
