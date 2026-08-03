@@ -107,16 +107,16 @@ class _CuttingResultScreenState extends State<CuttingResultScreen> {
   }
 
   Future<void> _addToStack() async {
-    final added = await showAddToStackSheet(
+    final stackId = await showAddToStackSheet(
       context,
-      diameterMm: widget.input.logDiameter,
-      lengthMm: widget.input.logLength,
+      diameterInches: widget.input.logDiameter / 25.4,
+      lengthFeet: widget.input.logLength / 304.8,
       volumeCubicFeet: _volumeCubicFeet,
     );
 
     if (!mounted) return;
 
-    if (added) {
+    if (stackId != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Added to stack.")),
       );

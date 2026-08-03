@@ -3,55 +3,53 @@ import 'package:flutter/material.dart';
 import '../database/local_db.dart';
 import '../repositories/stack_repository.dart';
 
-/// Shows a sheet letting the user add a measured log (diameter in inches,
-/// length in feet -- the same units the local database stores) to an
-/// existing stack or a brand new one. Returns the stack id it was added to,
-/// or null if the user cancelled.
-Future<int?> showAddToStackSheet(
-  BuildContext context, {
-  required double diameterInches,
-  required double lengthFeet,
-  required double volumeCubicFeet,
-  double cost = 0,
-}) async {
-  return showModalBottomSheet<int>(
+/// What the user picked in [showChooseStackSheet].
+class StackChoice {
+  final int? stackId;
+  final String? stackName;
+  final bool standalone;
+
+  StackChoice.stack(int id, String name)
+      : stackId = id,
+        stackName = name,
+        standalone = false;
+
+  StackChoice.standalone()
+      : stackId = null,
+        stackName = null,
+        standalone = true;
+}
+
+/// Shown before any log is measured: create a new stack, pick an existing
+/// one, or continue without one (logs get saved individually). Dismissing
+/// the sheet (tapping outside it) is treated the same as "continue without
+/// a stack" so the user is never stuck unable to proceed.
+Future<StackChoice> showChooseStackSheet(BuildContext context) async {
+  final result = await showModalBottomSheet<StackChoice>(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (_) => _AddToStackSheet(
-      diameterInches: diameterInches,
-      lengthFeet: lengthFeet,
-      volumeCubicFeet: volumeCubicFeet,
-      cost: cost,
-    ),
+    builder: (_) => const _ChooseStackSheet(),
   );
+
+  return result ?? StackChoice.standalone();
 }
 
-class _AddToStackSheet extends StatefulWidget {
-  final double diameterInches;
-  final double lengthFeet;
-  final double volumeCubicFeet;
-  final double cost;
-
-  const _AddToStackSheet({
-    required this.diameterInches,
-    required this.lengthFeet,
-    required this.volumeCubicFeet,
-    this.cost = 0,
-  });
+class _ChooseStackSheet extends StatefulWidget {
+  const _ChooseStackSheet();
 
   @override
-  State<_AddToStackSheet> createState() => _AddToStackSheetState();
+  State<_ChooseStackSheet> createState() => _ChooseStackSheetState();
 }
 
-class _AddToStackSheetState extends State<_AddToStackSheet> {
+class _ChooseStackSheetState extends State<_ChooseStackSheet> {
   List<Map<String, dynamic>> _stacks = [];
   bool _loading = true;
   bool _creatingNew = false;
   int? _selectedStackId;
 
   final _newStackNameController = TextEditingController();
-  bool _saving = false;
+  bool _busy = false;
 
   @override
   void initState() {
@@ -78,61 +76,47 @@ class _AddToStackSheetState extends State<_AddToStackSheet> {
     super.dispose();
   }
 
-  Future<void> _confirm() async {
-    setState(() => _saving = true);
+  Future<void> _confirmStack() async {
+    setState(() => _busy = true);
 
-    try {
-      int stackId;
+    if (_creatingNew) {
+      final name = _newStackNameController.text.trim();
 
-      if (_creatingNew) {
-        final name = _newStackNameController.text.trim();
-
-        if (name.isEmpty) {
-          setState(() => _saving = false);
-          return;
-        }
-
-        stackId = await StackRepository.instance.createStackAndAddLog(
-          name: name,
-          diameter: widget.diameterInches,
-          lengthFeet: widget.lengthFeet,
-          volume: widget.volumeCubicFeet,
-          cost: widget.cost,
-        );
-      } else {
-        if (_selectedStackId == null) {
-          setState(() => _saving = false);
-          return;
-        }
-
-        stackId = _selectedStackId!;
-
-        await StackRepository.instance.addLogToStack(
-          stackId: stackId,
-          diameter: widget.diameterInches,
-          lengthFeet: widget.lengthFeet,
-          volume: widget.volumeCubicFeet,
-          cost: widget.cost,
-        );
+      if (name.isEmpty) {
+        setState(() => _busy = false);
+        return;
       }
 
+      final stackId = await StackRepository.instance.createEmptyStack(name);
+
       if (!mounted) return;
-      Navigator.pop(context, stackId);
-    } catch (_) {
+      Navigator.pop(context, StackChoice.stack(stackId, name));
+    } else {
+      if (_selectedStackId == null) {
+        setState(() => _busy = false);
+        return;
+      }
+
+      final name = _stacks.firstWhere(
+            (s) => s["id"] == _selectedStackId,
+          )["name"] as String? ??
+          "Stack";
+
       if (!mounted) return;
-      setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Could not save to stack.")),
-      );
+      Navigator.pop(context, StackChoice.stack(_selectedStackId!, name));
     }
+  }
+
+  void _continueStandalone() {
+    Navigator.pop(context, StackChoice.standalone());
   }
 
   @override
   Widget build(BuildContext context) {
     // showModalBottomSheet(isScrollControlled: true) removes the sheet's
-    // default height cap -- without an explicit max height here, content
-    // taller than the screen would render past the bottom uncapped rather
-    // than scrolling.
+    // default height cap, so without an explicit max height here a
+    // SingleChildScrollView gets unbounded constraints and never actually
+    // clips/scrolls -- it just renders past the bottom of the screen.
     final maxHeight = MediaQuery.of(context).size.height * 0.85;
 
     return ConstrainedBox(
@@ -170,14 +154,14 @@ class _AddToStackSheetState extends State<_AddToStackSheet> {
                       ),
                     ),
                     const Text(
-                      "Add This Log to a Stack",
+                      "Start a Stack?",
                       style:
                           TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 6),
-                    Text(
-                      "Volume: ${widget.volumeCubicFeet.toStringAsFixed(2)} ft³",
-                      style: const TextStyle(color: Colors.grey),
+                    const Text(
+                      "Group the logs you're about to measure into a stack, or skip this and save each log on its own.",
+                      style: TextStyle(color: Colors.grey),
                     ),
                     const SizedBox(height: 20),
                     if (_stacks.isNotEmpty) ...[
@@ -230,23 +214,20 @@ class _AddToStackSheetState extends State<_AddToStackSheet> {
                           border: OutlineInputBorder(),
                         ),
                       ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 20),
                     SizedBox(
                       height: 55,
                       child: ElevatedButton.icon(
-                        onPressed: _saving ? null : _confirm,
-                        icon: _saving
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Icon(Icons.layers),
-                        label: const Text("Add to Stack"),
+                        onPressed: _busy ? null : _confirmStack,
+                        icon: const Icon(Icons.layers),
+                        label: Text(
+                            _creatingNew ? "Create Stack" : "Use This Stack"),
                       ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextButton(
+                      onPressed: _busy ? null : _continueStandalone,
+                      child: const Text("Continue Without a Stack"),
                     ),
                   ],
                 ),
