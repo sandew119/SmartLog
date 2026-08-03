@@ -86,4 +86,45 @@ class LocalDB {
       orderBy: "id DESC",
     );
   }
+
+  static Future<List<Map<String, dynamic>>> getLogsForStack(
+    int stackId,
+  ) async {
+    final db = await database;
+
+    return await db.query(
+      "logs",
+      where: "stackId = ?",
+      whereArgs: [stackId],
+      orderBy: "id DESC",
+    );
+  }
+
+  /// Inserts a log under [stackId] and adds [volume] onto that stack's
+  /// running total, in a single transaction.
+  static Future<void> addLogAndUpdateStackVolume({
+    required int stackId,
+    required double diameter,
+    required double lengthFeet,
+    required double volume,
+  }) async {
+    final db = await database;
+
+    await db.transaction((txn) async {
+      await txn.insert(
+        "logs",
+        {
+          "stackId": stackId,
+          "diameter": diameter,
+          "lengthFeet": lengthFeet,
+          "volume": volume,
+        },
+      );
+
+      await txn.rawUpdate(
+        "UPDATE stacks SET totalVolume = totalVolume + ? WHERE id = ?",
+        [volume, stackId],
+      );
+    });
+  }
 }
