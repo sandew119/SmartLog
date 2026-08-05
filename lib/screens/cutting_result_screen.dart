@@ -4,18 +4,32 @@ import 'package:flutter/material.dart';
 
 import '../models/cutting_models.dart';
 import '../painters/cutting_pattern_painter.dart';
+import '../utils/calculator.dart';
+import '../widgets/add_to_stack_sheet.dart';
 
-class CuttingResultScreen extends StatelessWidget {
-  final File imageFile;
+class CuttingResultScreen extends StatefulWidget {
+  final File? imageFile;
+  final CuttingInput input;
   final CuttingResult result;
 
   const CuttingResultScreen({
     super.key,
-    required this.imageFile,
+    this.imageFile,
+    required this.input,
     required this.result,
   });
 
-  Widget statCard(
+  @override
+  State<CuttingResultScreen> createState() => _CuttingResultScreenState();
+}
+
+class _CuttingResultScreenState extends State<CuttingResultScreen> {
+  double get _volumeCubicFeet => Calculator.calculateVolume(
+        diameter: widget.input.logDiameter / 25.4,
+        lengthFeet: widget.input.logLength / 304.8,
+      );
+
+  Widget _statCard(
     String title,
     String value,
     IconData icon,
@@ -28,33 +42,18 @@ class CuttingResultScreen extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Row(
           children: [
-
             CircleAvatar(
               radius: 24,
               backgroundColor: color.withValues(alpha: 0.15),
-              child: Icon(
-                icon,
-                color: color,
-              ),
+              child: Icon(icon, color: color),
             ),
-
             const SizedBox(width: 15),
-
             Expanded(
               child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      color: Colors.grey,
-                    ),
-                  ),
-
+                  Text(title, style: const TextStyle(color: Colors.grey)),
                   const SizedBox(height: 5),
-
                   Text(
                     value,
                     style: const TextStyle(
@@ -62,129 +61,158 @@ class CuttingResultScreen extends StatelessWidget {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
-
                 ],
               ),
-            )
-
+            ),
           ],
         ),
       ),
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildPhotoOrPlaceholder() {
+    if (widget.imageFile != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(20),
+        child: Image.file(
+          widget.imageFile!,
+          height: 220,
+          width: double.infinity,
+          fit: BoxFit.cover,
+        ),
+      );
+    }
 
-    return Scaffold(
-
-      appBar: AppBar(
-        centerTitle: true,
-        title: const Text(
-          "Optimal Cutting Result",
+    return Container(
+      height: 160,
+      decoration: BoxDecoration(
+        color: const Color(0xFFF5F7FA),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.forest, size: 48, color: Colors.grey),
+            SizedBox(height: 8),
+            Text(
+              "No photo — manual measurements only",
+              style: TextStyle(color: Colors.grey),
+            ),
+          ],
         ),
       ),
+    );
+  }
 
+  Future<void> _addToStack() async {
+    final stackId = await showAddToStackSheet(
+      context,
+      diameterInches: widget.input.logDiameter / 25.4,
+      lengthFeet: widget.input.logLength / 304.8,
+      volumeCubicFeet: _volumeCubicFeet,
+    );
+
+    if (!mounted) return;
+
+    if (stackId != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Added to stack.")),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final result = widget.result;
+
+    return Scaffold(
+      appBar: AppBar(
+        centerTitle: true,
+        title: const Text("Optimal Cutting Result"),
+      ),
       body: ListView(
-
         padding: const EdgeInsets.all(16),
-
         children: [
-
-          ClipRRect(
-            borderRadius:
-                BorderRadius.circular(20),
-            child: Image.file(
-              imageFile,
-              height: 220,
-              fit: BoxFit.cover,
-            ),
-          ),
-
+          _buildPhotoOrPlaceholder(),
           const SizedBox(height: 20),
-
           const Text(
             "Generated Cutting Pattern",
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-            ),
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
           ),
-
           const SizedBox(height: 15),
-
           Container(
             height: 420,
             decoration: BoxDecoration(
               color: Colors.white,
-              borderRadius:
-                  BorderRadius.circular(20),
-              border: Border.all(
-                color: Colors.grey.shade300,
-              ),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.grey.shade300),
             ),
             child: InteractiveViewer(
               minScale: .5,
               maxScale: 5,
               child: CustomPaint(
-                size: const Size(
-                  700,
-                  700,
-                ),
-                painter:
-                    CuttingPatternPainter(
-                  result,
-                ),
+                size: const Size(700, 700),
+                painter: CuttingPatternPainter(result),
               ),
             ),
           ),
-
           const SizedBox(height: 25),
-
-          statCard(
+          _statCard(
             "Boards",
-            result.totalBoards.toString(),
+            result.boardCount.toString(),
             Icons.dashboard,
             Colors.blue,
           ),
-
-          statCard(
+          _statCard(
             "Yield",
             "${result.utilization.toStringAsFixed(1)} %",
             Icons.pie_chart,
             Colors.green,
           ),
-
-          statCard(
+          _statCard(
             "Waste",
             "${result.waste.toStringAsFixed(1)} %",
             Icons.delete_outline,
             Colors.red,
           ),
-
-          statCard(
+          _statCard(
+            "Kerf Loss",
+            "${result.kerfLoss.toStringAsFixed(0)} mm²",
+            Icons.content_cut,
+            Colors.brown,
+          ),
+          _statCard(
             "Estimated Profit",
-            "Rs. ${result.estimatedProfit.toStringAsFixed(2)}",
+            "Rs. ${result.profit.toStringAsFixed(2)}",
             Icons.attach_money,
             Colors.orange,
           ),
-
-          const SizedBox(height: 20),
-
-          ElevatedButton.icon(
-            onPressed: () {
-              Navigator.pop(context);
-            },
-            icon: const Icon(
-              Icons.camera_alt,
-            ),
-            label: const Text(
-              "Scan Another Log",
+          _statCard(
+            "Log Volume",
+            "${_volumeCubicFeet.toStringAsFixed(2)} ft³",
+            Icons.straighten,
+            Colors.teal,
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 55,
+            child: ElevatedButton.icon(
+              onPressed: _addToStack,
+              icon: const Icon(Icons.layers),
+              label: const Text("Add to Stack"),
             ),
           ),
-
+          const SizedBox(height: 15),
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.popUntil(context, (route) => route.isFirst);
+            },
+            icon: const Icon(Icons.home),
+            label: const Text("Back to Home"),
+          ),
           const SizedBox(height: 30),
-
         ],
       ),
     );

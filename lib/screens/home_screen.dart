@@ -5,7 +5,6 @@ import 'auth/login_screen.dart';
 import 'profile/profile_screen.dart';
 
 import 'manual_calculator_screen.dart';
-import 'manual_stack_screen.dart';
 import 'saved_stacks_screen.dart';
 import 'scan_log_screen.dart';
 import 'optimal_cutting_screen.dart';
@@ -24,7 +23,6 @@ class HomeScreen extends StatelessWidget {
 
         return Scaffold(
           backgroundColor: const Color(0xffF5F7FA),
-
           appBar: AppBar(
             centerTitle: true,
             title: const Text(
@@ -82,7 +80,6 @@ class HomeScreen extends StatelessWidget {
                 ),
             ],
           ),
-
           body: Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -90,17 +87,11 @@ class HomeScreen extends StatelessWidget {
                 Card(
                   child: ListTile(
                     leading: Icon(
-                      user == null
-                          ? Icons.cloud_off
-                          : Icons.cloud_done,
-                      color: user == null
-                          ? Colors.orange
-                          : Colors.green,
+                      user == null ? Icons.cloud_off : Icons.cloud_done,
+                      color: user == null ? Colors.orange : Colors.green,
                     ),
                     title: Text(
-                      user == null
-                          ? "Guest Mode"
-                          : "Cloud Sync Enabled",
+                      user == null ? "Guest Mode" : "Cloud Sync Enabled",
                     ),
                     subtitle: Text(
                       user == null
@@ -109,9 +100,7 @@ class HomeScreen extends StatelessWidget {
                     ),
                   ),
                 ),
-
                 const SizedBox(height: 15),
-
                 Expanded(
                   child: GridView.count(
                     crossAxisCount: 2,
@@ -129,12 +118,6 @@ class HomeScreen extends StatelessWidget {
                         "Manual Calculator",
                         Icons.calculate,
                         const ManualCalculatorScreen(),
-                      ),
-                      _card(
-                        context,
-                        "Manual Stack",
-                        Icons.layers,
-                        const ManualStackScreen(),
                       ),
                       _card(
                         context,

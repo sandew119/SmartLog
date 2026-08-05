@@ -3,179 +3,177 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
-import '../models/cutting_models.dart';
 import '../services/cutting_engine.dart';
-import '../widgets/cutting_dialog.dart';
+import '../services/lidar_service.dart';
+import '../widgets/cutting_setup_sheet.dart';
 import 'cutting_result_screen.dart';
+import 'lidar_measurement_screen.dart';
 
-enum ScanMode {
-  manual,
-  lidar,
+enum _Stage {
+  modeSelect,
+  manualCamera,
 }
 
 class OptimalCuttingScreen extends StatefulWidget {
   const OptimalCuttingScreen({super.key});
 
   @override
-  State<OptimalCuttingScreen> createState() =>
-      _OptimalCuttingScreenState();
+  State<OptimalCuttingScreen> createState() => _OptimalCuttingScreenState();
 }
 
-class _OptimalCuttingScreenState
-    extends State<OptimalCuttingScreen> {
+class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
+  _Stage _stage = _Stage.modeSelect;
+
+  bool _checkingLiDAR = true;
+  bool _lidarAvailable = false;
 
   CameraController? _cameraController;
-
-  bool cameraLoading = true;
-  bool cameraReady = false;
-
-  bool imageCaptured = false;
-
-  XFile? capturedImage;
-
-  ScanMode selectedMode =
-      ScanMode.manual;
+  bool _cameraLoading = true;
+  bool _cameraReady = false;
+  bool _imageCaptured = false;
+  XFile? _capturedImage;
 
   @override
   void initState() {
     super.initState();
-    _initializeCamera();
+    _checkLiDAR();
   }
 
-  Future<void> _initializeCamera() async {
+  Future<void> _checkLiDAR() async {
+    final available = await LiDARService.instance.isLiDARAvailable();
+    if (!mounted) return;
+    setState(() {
+      _lidarAvailable = available;
+      _checkingLiDAR = false;
+    });
+  }
 
+  Future<void> _initCamera() async {
     try {
-
-      final cameras =
-          await availableCameras();
+      final cameras = await availableCameras();
 
       if (cameras.isEmpty) {
-
         if (!mounted) return;
-
-        setState(() {
-          cameraLoading = false;
-        });
-
+        setState(() => _cameraLoading = false);
         return;
       }
 
-      _cameraController =
-          CameraController(
+      _cameraController = CameraController(
         cameras.first,
         ResolutionPreset.high,
         enableAudio: false,
       );
 
-      await _cameraController!
-          .initialize();
+      await _cameraController!.initialize();
 
       if (!mounted) return;
 
       setState(() {
-
-        cameraLoading = false;
-        cameraReady = true;
-
+        _cameraLoading = false;
+        _cameraReady = true;
       });
-
-    } catch (e) {
-
+    } catch (_) {
       if (!mounted) return;
-
       setState(() {
-
-        cameraLoading = false;
-        cameraReady = false;
-
+        _cameraLoading = false;
+        _cameraReady = false;
       });
-
     }
   }
 
   Future<void> _captureImage() async {
-
-    if (_cameraController == null) {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
       return;
     }
 
-    if (!_cameraController!
-        .value
-        .isInitialized) {
-      return;
-    }
-
-    final image =
-        await _cameraController!
-            .takePicture();
+    final image = await _cameraController!.takePicture();
 
     if (!mounted) return;
 
     setState(() {
-
-      capturedImage = image;
-
-      imageCaptured = true;
-
+      _capturedImage = image;
+      _imageCaptured = true;
     });
   }
 
   void _retake() {
-
     setState(() {
-
-      imageCaptured = false;
-
-      capturedImage = null;
-
-      selectedMode =
-          ScanMode.manual;
-
+      _imageCaptured = false;
+      _capturedImage = null;
     });
   }
 
-  Future<void> _generatePattern() async {
-
-    if (capturedImage == null) {
+  Future<void> _openLiDARFlow() async {
+    if (!_lidarAvailable) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            "LiDAR scanning isn't available on this device. Use Manual Measurements instead.",
+          ),
+        ),
+      );
       return;
     }
 
-    final CuttingInput? input =
-        await showDialog<CuttingInput>(
-
-      context: context,
-
-      barrierDismissible: false,
-
-      builder: (_) =>
-          const CuttingDialog(),
-    );
-
-    if (input == null) {
-      return;
-    }
-
-    final result =
-        CuttingEngine.generate(
-      input,
+    final result = await Navigator.push<LiDARMeasurementResult?>(
+      context,
+      MaterialPageRoute(builder: (_) => const LiDARMeasurementScreen()),
     );
 
     if (!mounted) return;
 
-    Navigator.push(
+    if (result == null) {
+      // User chose "Switch to Manual" inside the LiDAR screen.
+      setState(() => _stage = _Stage.manualCamera);
+      _initCamera();
+      return;
+    }
 
+    final input = await showCuttingSetupSheet(
       context,
+      logDimensions: result.logDimensions,
+      measuredViaLidar: true,
+    );
 
+    if (input == null || !mounted) return;
+
+    final cuttingResult = CuttingEngine.generate(input);
+
+    if (!mounted) return;
+
+    Navigator.push(
+      context,
       MaterialPageRoute(
+        builder: (_) => CuttingResultScreen(
+          imageFile: result.photo,
+          input: input,
+          result: cuttingResult,
+        ),
+      ),
+    );
+  }
 
-        builder: (_) =>
-            CuttingResultScreen(
+  void _openManualFlow() {
+    setState(() => _stage = _Stage.manualCamera);
+    _initCamera();
+  }
 
-          imageFile:
-              File(capturedImage!.path),
+  Future<void> _proceedManual({File? photo}) async {
+    final input = await showCuttingSetupSheet(context);
 
-          result: result,
+    if (input == null || !mounted) return;
 
+    final cuttingResult = CuttingEngine.generate(input);
+
+    if (!mounted) return;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CuttingResultScreen(
+          imageFile: photo,
+          input: input,
+          result: cuttingResult,
         ),
       ),
     );
@@ -183,424 +181,244 @@ class _OptimalCuttingScreenState
 
   @override
   void dispose() {
-
     _cameraController?.dispose();
-
     super.dispose();
-  }
-    Widget _buildCamera() {
-
-    if (cameraLoading) {
-      return const Center(
-        child: CircularProgressIndicator(),
-      );
-    }
-
-    if (!cameraReady) {
-      return const Center(
-        child: Text(
-          "Camera not available",
-          style: TextStyle(
-            color: Colors.white,
-          ),
-        ),
-      );
-    }
-
-    if (imageCaptured) {
-      return ClipRRect(
-        borderRadius:
-            BorderRadius.circular(20),
-        child: Image.file(
-          File(capturedImage!.path),
-          fit: BoxFit.cover,
-        ),
-      );
-    }
-
-    return ClipRRect(
-      borderRadius:
-          BorderRadius.circular(20),
-      child: CameraPreview(
-        _cameraController!,
-      ),
-    );
-  }
-
-  Widget _buildCaptureButtons() {
-
-    if (!imageCaptured) {
-
-      return SizedBox(
-        width: 260,
-        height: 55,
-        child: ElevatedButton.icon(
-          onPressed: _captureImage,
-          icon: const Icon(
-            Icons.camera_alt,
-          ),
-          label: const Text(
-            "Capture Log Surface",
-          ),
-        ),
-      );
-    }
-
-    return Row(
-
-      children: [
-
-        Expanded(
-          child: ElevatedButton.icon(
-            onPressed: _retake,
-            icon: const Icon(
-              Icons.refresh,
-            ),
-            label: const Text(
-              "Retake",
-            ),
-          ),
-        ),
-
-        const SizedBox(width: 15),
-
-        Expanded(
-          child: ElevatedButton.icon(
-            onPressed: () {
-  if (selectedMode == ScanMode.manual) {
-    _generatePattern();
-  } else {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          "LiDAR mode is under development.",
-        ),
-      ),
-    );
-  }
-},
-            icon: const Icon(
-              Icons.check_circle,
-            ),
-            label: const Text(
-              "Use Photo",
-            ),
-          ),
-        ),
-
-      ],
-    );
-  }
-
-  Widget _buildModeSelector() {
-
-    if (!imageCaptured) {
-      return const SizedBox();
-    }
-
-    return Padding(
-      padding:
-          const EdgeInsets.symmetric(
-        horizontal: 20,
-      ),
-      child: Row(
-        children: [
-
-          Expanded(
-            child: ElevatedButton(
-              style:
-                  ElevatedButton.styleFrom(
-                backgroundColor:
-                    selectedMode ==
-                            ScanMode.manual
-                        ? Colors.green
-                        : Colors.grey.shade300,
-                foregroundColor:
-                    selectedMode ==
-                            ScanMode.manual
-                        ? Colors.white
-                        : Colors.black,
-              ),
-              onPressed: () {
-                setState(() {
-                  selectedMode =
-                      ScanMode.manual;
-                });
-              },
-              child: const Text(
-                "Manual Mode",
-              ),
-            ),
-          ),
-
-          const SizedBox(width: 12),
-
-          Expanded(
-            child: ElevatedButton(
-              style:
-                  ElevatedButton.styleFrom(
-                backgroundColor:
-                    selectedMode ==
-                            ScanMode.lidar
-                        ? Colors.green
-                        : Colors.grey.shade300,
-                foregroundColor:
-                    selectedMode ==
-                            ScanMode.lidar
-                        ? Colors.white
-                        : Colors.black,
-              ),
-              onPressed: () {
-                setState(() {
-                  selectedMode =
-                      ScanMode.lidar;
-                });
-              },
-              child: const Text(
-                "LiDAR Mode",
-              ),
-            ),
-          ),
-
-        ],
-      ),
-    );
-  }
-    Widget _buildBottomSection() {
-
-    if (!imageCaptured) {
-      return const Expanded(
-        child: Center(
-          child: Text(
-            "Capture the log surface to continue.",
-            style: TextStyle(
-              fontSize: 18,
-            ),
-          ),
-        ),
-      );
-    }
-
-    if (selectedMode == ScanMode.lidar) {
-
-      return Expanded(
-        child: Center(
-          child: Column(
-            mainAxisAlignment:
-                MainAxisAlignment.center,
-            children: const [
-
-              Icon(
-                Icons.sensors,
-                size: 90,
-                color: Colors.green,
-              ),
-
-              SizedBox(height: 20),
-
-              Text(
-                "LiDAR Mode",
-                style: TextStyle(
-                  fontSize: 28,
-                  fontWeight:
-                      FontWeight.bold,
-                ),
-              ),
-
-              SizedBox(height: 15),
-
-              Padding(
-                padding:
-                    EdgeInsets.symmetric(
-                  horizontal: 30,
-                ),
-                child: Text(
-                  "LiDAR optimization is coming soon.\nPlease use Manual Mode.",
-                  textAlign:
-                      TextAlign.center,
-                ),
-              ),
-
-            ],
-          ),
-        ),
-      );
-    }
-
-    return Expanded(
-      child: Center(
-        child: Column(
-          mainAxisAlignment:
-              MainAxisAlignment.center,
-          children: [
-
-            const Icon(
-              Icons.content_cut,
-              size: 90,
-              color: Colors.green,
-            ),
-
-            const SizedBox(height: 20),
-
-            const Text(
-              "Manual Optimization",
-              style: TextStyle(
-                fontSize: 28,
-                fontWeight:
-                    FontWeight.bold,
-              ),
-            ),
-
-            const SizedBox(height: 15),
-
-            const Padding(
-              padding:
-                  EdgeInsets.symmetric(
-                horizontal: 30,
-              ),
-              child: Text(
-                "Use the captured image together with manual measurements to generate the cutting pattern.",
-                textAlign:
-                    TextAlign.center,
-              ),
-            ),
-
-            const SizedBox(height: 30),
-
-            SizedBox(
-              width: 280,
-              height: 55,
-              child: ElevatedButton.icon(
-                onPressed:
-                    _generatePattern,
-                icon: const Icon(
-                  Icons.auto_graph,
-                ),
-                label: const Text(
-                  "Let's Cut This Optimally",
-                ),
-              ),
-            ),
-
-          ],
-        ),
-      ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
-
     return Scaffold(
-
-      backgroundColor:
-          const Color(0xffF5F7FA),
-
+      backgroundColor: const Color(0xffF5F7FA),
       appBar: AppBar(
         centerTitle: true,
-        title: const Text(
-          "Optimal Cutting",
-        ),
+        title: const Text("Optimal Cutting"),
       ),
-
       body: SafeArea(
-        child: Column(
-          children: [
+        child: _stage == _Stage.modeSelect
+            ? _buildModeSelect()
+            : _buildManualCamera(),
+      ),
+    );
+  }
 
-            const SizedBox(height: 15),
+  Widget _buildModeSelect() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        children: [
+          const SizedBox(height: 10),
+          const Text(
+            "How would you like to measure the log?",
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            "A photo of the log is required for LiDAR scanning. For manual entry, taking a photo is recommended but optional.",
+            style: TextStyle(color: Colors.grey),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 30),
+          _modeCard(
+            title: "Scan with LiDAR",
+            subtitle: _checkingLiDAR
+                ? "Checking device support..."
+                : (_lidarAvailable
+                    ? "Automatically measure diameter and length using your iPhone's LiDAR sensor."
+                    : "Not available on this device."),
+            icon: Icons.sensors,
+            enabled: !_checkingLiDAR,
+            highlighted: _lidarAvailable,
+            onTap: _openLiDARFlow,
+          ),
+          const SizedBox(height: 20),
+          _modeCard(
+            title: "Manual Measurements",
+            subtitle:
+                "Enter the log's diameter and length yourself, with an optional photo.",
+            icon: Icons.rule,
+            enabled: true,
+            highlighted: true,
+            onTap: _openManualFlow,
+          ),
+        ],
+      ),
+    );
+  }
 
-            const Text(
-              "Capture Log Surface",
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight:
-                    FontWeight.bold,
-              ),
+  Widget _modeCard({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required bool enabled,
+    required bool highlighted,
+    required VoidCallback onTap,
+  }) {
+    return Opacity(
+      opacity: enabled ? 1 : 0.6,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: enabled ? onTap : null,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: highlighted ? Colors.green : Colors.grey.shade300,
+              width: highlighted ? 2 : 1,
             ),
-
-            const SizedBox(height: 8),
-
-            Text(
-              imageCaptured
-                  ? "Image captured successfully."
-                  : "Align the timber log inside the guide.",
-              style: const TextStyle(
-                color: Colors.grey,
+          ),
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 28,
+                backgroundColor: Colors.green.withValues(alpha: 0.12),
+                child: Icon(icon, color: Colors.green, size: 28),
               ),
-            ),
-
-            const SizedBox(height: 20),
-
-            Center(
-              child: SizedBox(
-                width: 320,
-                height: 320,
-                child: Stack(
-                  alignment:
-                      Alignment.center,
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-
-                    Container(
-                      width: 300,
-                      height: 300,
-                      decoration:
-                          BoxDecoration(
-                        color:
-                            Colors.black,
-                        borderRadius:
-                            BorderRadius
-                                .circular(
-                                    20),
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
                       ),
-                      child:
-                          _buildCamera(),
                     ),
-
-                    if (!imageCaptured)
-                      IgnorePointer(
-                        child: Container(
-                          width: 240,
-                          height: 240,
-                          decoration:
-                              BoxDecoration(
-                            shape:
-                                BoxShape
-                                    .circle,
-                            border:
-                                Border.all(
-                              color: Colors.green,
-                              width: 4,
-                            ),
-                          ),
-                        ),
-                      ),
-
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(color: Colors.grey),
+                    ),
                   ],
                 ),
               ),
-            ),
-
-            const SizedBox(height: 25),
-
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(
-                horizontal: 20,
-              ),
-              child:
-                  _buildCaptureButtons(),
-            ),
-
-            const SizedBox(height: 20),
-
-            _buildModeSelector(),
-
-            const SizedBox(height: 10),
-
-            _buildBottomSection(),
-
-          ],
+              const Icon(Icons.chevron_right, color: Colors.grey),
+            ],
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildManualCamera() {
+    Widget cameraPreview;
+
+    if (_cameraLoading) {
+      cameraPreview = const Center(child: CircularProgressIndicator());
+    } else if (!_cameraReady) {
+      cameraPreview = const Center(
+        child: Text(
+          "Camera not available",
+          style: TextStyle(color: Colors.white),
+        ),
+      );
+    } else if (_imageCaptured) {
+      cameraPreview = ClipRRect(
+        borderRadius: BorderRadius.circular(20),
+        child: Image.file(File(_capturedImage!.path), fit: BoxFit.cover),
+      );
+    } else {
+      cameraPreview = ClipRRect(
+        borderRadius: BorderRadius.circular(20),
+        child: CameraPreview(_cameraController!),
+      );
+    }
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: Column(
+        children: [
+          const SizedBox(height: 15),
+          const Text(
+            "Photograph the Log (Optional)",
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _imageCaptured
+                ? "Image captured successfully."
+                : "Align the timber log inside the guide, or skip below.",
+            style: const TextStyle(color: Colors.grey),
+          ),
+          const SizedBox(height: 20),
+          Center(
+            child: SizedBox(
+              width: 320,
+              height: 320,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Container(
+                    width: 300,
+                    height: 300,
+                    decoration: BoxDecoration(
+                      color: Colors.black,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: cameraPreview,
+                  ),
+                  if (!_imageCaptured)
+                    IgnorePointer(
+                      child: Container(
+                        width: 240,
+                        height: 240,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.green, width: 4),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 25),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: _imageCaptured
+                ? Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: _retake,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text("Retake"),
+                        ),
+                      ),
+                      const SizedBox(width: 15),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () => _proceedManual(
+                            photo: File(_capturedImage!.path),
+                          ),
+                          icon: const Icon(Icons.check_circle),
+                          label: const Text("Use Photo"),
+                        ),
+                      ),
+                    ],
+                  )
+                : SizedBox(
+                    width: double.infinity,
+                    height: 55,
+                    child: ElevatedButton.icon(
+                      onPressed: _cameraReady ? _captureImage : null,
+                      icon: const Icon(Icons.camera_alt),
+                      label: const Text("Capture Log Surface"),
+                    ),
+                  ),
+          ),
+          const SizedBox(height: 10),
+          if (!_imageCaptured)
+            TextButton(
+              onPressed: () => _proceedManual(),
+              child: const Text("Skip photo, enter manually"),
+            ),
+        ],
       ),
     );
   }
