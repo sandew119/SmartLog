@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../database/local_db.dart';
 import '../models/log_model.dart';
 import '../repositories/stack_repository.dart';
+import '../services/user_preferences_service.dart';
+import '../utils/log_volume_pipeline.dart';
 import '../utils/timber_volume.dart';
 import '../widgets/choose_stack_sheet.dart';
 
@@ -40,8 +42,14 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
   final List<_LogRow> _rows = [];
   final _priceController = TextEditingController();
 
+  final _prefsService = UserPreferencesService.instance;
+
   _UnitSystem _unitSystem = _UnitSystem.inchesFeet;
-  VolumeMethod _method = VolumeMethod.standard;
+
+  /// Mirrors the profile setting rather than being independent state: the
+  /// toggle below writes through to the user's preferences, so the method
+  /// is the same wherever it's changed from.
+  VolumeMethod get _method => _prefsService.current.volumeMethod;
 
   int? _activeStackId;
   String? _activeStackName;
@@ -61,14 +69,22 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
   @override
   void initState() {
     super.initState();
+    _prefsService.listenable.addListener(_onPrefsChanged);
+
     // Defer to after the first frame: showChooseStackSheet needs a fully
     // mounted context (showModalBottomSheet depends on Localizations),
     // which isn't available yet while still inside initState.
     WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
   }
 
+  void _onPrefsChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    _prefsService.listenable.removeListener(_onPrefsChanged);
+
     for (final row in _rows) {
       row.dispose();
     }
@@ -178,9 +194,11 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
       return;
     }
 
-    final result = TimberVolumeCalculator.calculate(
-      method: _method,
-      diameterInches: diameterInches,
+    // Goes through the shared pipeline so the profile's diameter deduction
+    // is applied here exactly as it will be on the scan screen.
+    final result = volumeForLog(
+      prefs: _prefsService.current,
+      measuredDiameterInches: diameterInches,
       lengthFeet: lengthFeet,
     );
 
@@ -364,10 +382,11 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
             ),
             value: _method == VolumeMethod.referenceTable,
             onChanged: (value) {
-              setState(() {
-                _method =
-                    value ? VolumeMethod.referenceTable : VolumeMethod.standard;
-              });
+              // Writes through to the profile setting so there is one source
+              // of truth; the listener installed in initState rebuilds this.
+              _prefsService.setVolumeMethod(
+                value ? VolumeMethod.referenceTable : VolumeMethod.standard,
+              );
             },
           ),
           const Divider(height: 1),

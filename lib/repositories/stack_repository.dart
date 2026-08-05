@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../database/local_db.dart';
+import '../models/log_measurement.dart';
 import '../models/log_model.dart';
 import '../models/saved_item.dart';
 import '../models/stack_model.dart';
@@ -24,6 +25,8 @@ class StackRepository {
     required double lengthFeet,
     required double volume,
     double cost = 0,
+    LogMeasurement? measurement,
+    double? deductionInches,
   }) async {
     final stackId = await LocalDB.createStack(name, 0);
 
@@ -33,6 +36,12 @@ class StackRepository {
       lengthFeet: lengthFeet,
       volume: volume,
       cost: cost,
+      measurementSource: measurement?.source.name,
+      rawDiameterInches: measurement?.minDiameterInches,
+      deductionInches: deductionInches,
+      diameterToleranceInches: measurement?.diameterToleranceInches,
+      measurementQuality: measurement?.quality.name,
+      diameterProfile: measurement?.encodedProfile,
     );
 
     unawaited(_syncStack(stackId));
@@ -46,6 +55,8 @@ class StackRepository {
     required double lengthFeet,
     required double volume,
     double cost = 0,
+    LogMeasurement? measurement,
+    double? deductionInches,
   }) async {
     final logId = await LocalDB.addLogAndUpdateStackVolume(
       stackId: stackId,
@@ -53,6 +64,12 @@ class StackRepository {
       lengthFeet: lengthFeet,
       volume: volume,
       cost: cost,
+      measurementSource: measurement?.source.name,
+      rawDiameterInches: measurement?.minDiameterInches,
+      deductionInches: deductionInches,
+      diameterToleranceInches: measurement?.diameterToleranceInches,
+      measurementQuality: measurement?.quality.name,
+      diameterProfile: measurement?.encodedProfile,
     );
 
     unawaited(_syncStack(stackId));
@@ -78,12 +95,20 @@ class StackRepository {
     required double lengthFeet,
     required double volume,
     double cost = 0,
+    LogMeasurement? measurement,
+    double? deductionInches,
   }) async {
     final logId = await LocalDB.addStandaloneLog(
       diameter: diameter,
       lengthFeet: lengthFeet,
       volume: volume,
       cost: cost,
+      measurementSource: measurement?.source.name,
+      rawDiameterInches: measurement?.minDiameterInches,
+      deductionInches: deductionInches,
+      diameterToleranceInches: measurement?.diameterToleranceInches,
+      measurementQuality: measurement?.quality.name,
+      diameterProfile: measurement?.encodedProfile,
     );
 
     unawaited(_syncStandaloneLog(logId));

@@ -40,7 +40,9 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
   }
 
   Future<void> _checkLiDAR() async {
-    final available = await LiDARService.instance.isLiDARAvailable();
+    // Feature-point AR, not depth scanning -- this flow works on any
+    // ARKit-capable iPhone, so it deliberately uses the broader check.
+    final available = await LiDARService.instance.isARAvailable();
     if (!mounted) return;
     setState(() {
       _lidarAvailable = available;

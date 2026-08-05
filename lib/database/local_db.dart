@@ -18,6 +18,23 @@ class LocalDB {
     return _database!;
   }
 
+  /// Test-only: closes and forgets the cached connection so the next access
+  /// reopens using the current [testDatabasePath].
+  ///
+  /// Without this, setting [testDatabasePath] between tests in the same file
+  /// has no effect -- the already-open database is cached statically and
+  /// every test silently shares the first one's data.
+  static Future<void> resetForTesting() async {
+    final db = _database;
+    _database = null;
+
+    if (db != null) {
+      try {
+        await db.close();
+      } catch (_) {}
+    }
+  }
+
   static Future<Database> _initDatabase() async {
     final path = testDatabasePath ??
         join(
@@ -27,7 +44,7 @@ class LocalDB {
 
     return openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE stacks(
@@ -47,7 +64,13 @@ class LocalDB {
             lengthFeet REAL,
             volume REAL,
             cost REAL DEFAULT 0,
-            createdAt TEXT
+            createdAt TEXT,
+            measurementSource TEXT,
+            rawDiameterInches REAL,
+            deductionInches REAL,
+            diameterToleranceInches REAL,
+            measurementQuality TEXT,
+            diameterProfile TEXT
           )
         ''');
       },
@@ -64,6 +87,30 @@ class LocalDB {
           );
           await db.execute(
             "ALTER TABLE logs ADD COLUMN createdAt TEXT",
+          );
+        }
+
+        if (oldVersion < 3) {
+          // Measurement provenance. Without it a disputed volume can't be
+          // audited -- you can't tell whether a figure came from a sensor
+          // or a keyboard, or what allowance was applied at the time.
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN measurementSource TEXT",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN rawDiameterInches REAL",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN deductionInches REAL",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN diameterToleranceInches REAL",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN measurementQuality TEXT",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN diameterProfile TEXT",
           );
         }
       },
@@ -88,12 +135,39 @@ class LocalDB {
     );
   }
 
+  /// Audit trail for how a log's stored diameter was arrived at. All fields
+  /// are optional so every existing caller keeps working untouched; rows
+  /// written before this existed simply carry nulls.
+  static Map<String, Object?> _provenanceColumns({
+    String? measurementSource,
+    double? rawDiameterInches,
+    double? deductionInches,
+    double? diameterToleranceInches,
+    String? measurementQuality,
+    String? diameterProfile,
+  }) {
+    return {
+      "measurementSource": measurementSource,
+      "rawDiameterInches": rawDiameterInches,
+      "deductionInches": deductionInches,
+      "diameterToleranceInches": diameterToleranceInches,
+      "measurementQuality": measurementQuality,
+      "diameterProfile": diameterProfile,
+    };
+  }
+
   static Future<void> addLog({
     required int stackId,
     required double diameter,
     required double lengthFeet,
     required double volume,
     double cost = 0,
+    String? measurementSource,
+    double? rawDiameterInches,
+    double? deductionInches,
+    double? diameterToleranceInches,
+    String? measurementQuality,
+    String? diameterProfile,
   }) async {
     final db = await database;
 
@@ -106,6 +180,14 @@ class LocalDB {
         "volume": volume,
         "cost": cost,
         "createdAt": DateTime.now().toIso8601String(),
+        ..._provenanceColumns(
+          measurementSource: measurementSource,
+          rawDiameterInches: rawDiameterInches,
+          deductionInches: deductionInches,
+          diameterToleranceInches: diameterToleranceInches,
+          measurementQuality: measurementQuality,
+          diameterProfile: diameterProfile,
+        ),
       },
     );
   }
@@ -116,6 +198,12 @@ class LocalDB {
     required double lengthFeet,
     required double volume,
     double cost = 0,
+    String? measurementSource,
+    double? rawDiameterInches,
+    double? deductionInches,
+    double? diameterToleranceInches,
+    String? measurementQuality,
+    String? diameterProfile,
   }) async {
     final db = await database;
 
@@ -128,6 +216,14 @@ class LocalDB {
         "volume": volume,
         "cost": cost,
         "createdAt": DateTime.now().toIso8601String(),
+        ..._provenanceColumns(
+          measurementSource: measurementSource,
+          rawDiameterInches: rawDiameterInches,
+          deductionInches: deductionInches,
+          diameterToleranceInches: diameterToleranceInches,
+          measurementQuality: measurementQuality,
+          diameterProfile: diameterProfile,
+        ),
       },
     );
   }
@@ -198,6 +294,12 @@ class LocalDB {
     required double lengthFeet,
     required double volume,
     double cost = 0,
+    String? measurementSource,
+    double? rawDiameterInches,
+    double? deductionInches,
+    double? diameterToleranceInches,
+    String? measurementQuality,
+    String? diameterProfile,
   }) async {
     final db = await database;
 
@@ -211,6 +313,14 @@ class LocalDB {
           "volume": volume,
           "cost": cost,
           "createdAt": DateTime.now().toIso8601String(),
+          ..._provenanceColumns(
+            measurementSource: measurementSource,
+            rawDiameterInches: rawDiameterInches,
+            deductionInches: deductionInches,
+            diameterToleranceInches: diameterToleranceInches,
+            measurementQuality: measurementQuality,
+            diameterProfile: diameterProfile,
+          ),
         },
       );
 

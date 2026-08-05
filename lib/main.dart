@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 
 import 'firebase_options.dart';
 import 'screens/auth/auth_gate.dart';
+import 'services/cloud_preferences_sync_service.dart';
+import 'services/user_preferences_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -10,6 +12,15 @@ Future<void> main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // Load measurement settings before the first frame so no screen ever
+  // renders a volume using the wrong method, and install the best-effort
+  // cloud mirror. A settings failure must never block app start.
+  try {
+    await UserPreferencesService.instance.load();
+    UserPreferencesService.instance.syncCallback =
+        CloudPreferencesSyncService.instance.push;
+  } catch (_) {}
 
   runApp(const SmartLogApp());
 }
