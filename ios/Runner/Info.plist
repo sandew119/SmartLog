@@ -28,6 +28,21 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>SmartLog uses the camera to capture photos of wood logs and, on supported devices, to measure log dimensions with LiDAR for the Optimal Cutting feature.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<!-- REVERSED_CLIENT_ID from GoogleService-Info.plist. Google
+			     Sign-In hands control to Safari and returns through this
+			     scheme; without it the sign-in sheet opens and never
+			     comes back. Must stay in sync with that file. -->
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.426376339171-s6eleq3tiu700k7pp4pd89upcu59ijq9</string>
+			</array>
+		</dict>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
