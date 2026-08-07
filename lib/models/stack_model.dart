@@ -8,6 +8,16 @@ class StackModel {
   final DateTime createdAt;
   final List<LogModel> logs;
 
+  /// Who the stack is for. Optional -- null when the user didn't say.
+  ///
+  /// Note there is no company field here on purpose. The *seller's* company
+  /// lives on the user's profile and is read from there when a report is
+  /// generated; asking for it again per stack would be busywork.
+  final String? customerName;
+
+  /// Free-text note the user attached to the stack. Optional.
+  final String? remarks;
+
   StackModel({
     required this.id,
     required this.name,
@@ -15,6 +25,8 @@ class StackModel {
     this.totalCost = 0,
     required this.createdAt,
     this.logs = const [],
+    this.customerName,
+    this.remarks,
   });
 
   Map<String, dynamic> toMap() {
@@ -24,6 +36,8 @@ class StackModel {
       "totalVolume": totalVolume,
       "totalCost": totalCost,
       "createdAt": createdAt.toIso8601String(),
+      "customerName": customerName,
+      "remarks": remarks,
     };
   }
 
@@ -40,6 +54,15 @@ class StackModel {
           ? DateTime.parse(map["createdAt"] as String)
           : DateTime.fromMillisecondsSinceEpoch(0),
       logs: logs,
+      customerName: _text(map["customerName"]),
+      remarks: _text(map["remarks"]),
     );
+  }
+
+  /// Rows written before these columns existed carry nulls, and a row that
+  /// somehow stored an empty string should read the same as absent.
+  static String? _text(Object? value) {
+    final text = (value as String?)?.trim();
+    return (text == null || text.isEmpty) ? null : text;
   }
 }

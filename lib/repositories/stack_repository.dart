@@ -79,8 +79,21 @@ class StackRepository {
 
   /// Creates a stack with no logs yet -- used when the user picks "create a
   /// new stack" before measuring any logs.
-  Future<int> createEmptyStack(String name) async {
-    final stackId = await LocalDB.createStack(name, 0);
+  ///
+  /// [customerName] and [remarks] are optional; a stack is perfectly valid
+  /// without them. There is deliberately no company parameter: the seller's
+  /// company belongs to the user's profile, not to each stack.
+  Future<int> createEmptyStack(
+    String name, {
+    String? customerName,
+    String? remarks,
+  }) async {
+    final stackId = await LocalDB.createStack(
+      name,
+      0,
+      customerName: customerName,
+      remarks: remarks,
+    );
 
     final stackRow = await LocalDB.getStack(stackId);
     if (stackRow != null) {

@@ -44,7 +44,7 @@ class LocalDB {
 
     return openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE stacks(
@@ -52,7 +52,9 @@ class LocalDB {
             name TEXT,
             totalVolume REAL,
             totalCost REAL DEFAULT 0,
-            createdAt TEXT
+            createdAt TEXT,
+            customerName TEXT,
+            remarks TEXT
           )
         ''');
 
@@ -113,6 +115,21 @@ class LocalDB {
             "ALTER TABLE logs ADD COLUMN diameterProfile TEXT",
           );
         }
+
+        if (oldVersion < 4) {
+          // Who the stack is for, and anything the user wants to remember
+          // about it. Both optional -- a stack is still valid without them.
+          //
+          // Deliberately no company column: the seller's own company is a
+          // property of the user, read from their profile when a report is
+          // generated, never re-typed per stack.
+          await db.execute(
+            "ALTER TABLE stacks ADD COLUMN customerName TEXT",
+          );
+          await db.execute(
+            "ALTER TABLE stacks ADD COLUMN remarks TEXT",
+          );
+        }
       },
     );
   }
@@ -121,6 +138,8 @@ class LocalDB {
     String name,
     double totalVolume, {
     double totalCost = 0,
+    String? customerName,
+    String? remarks,
   }) async {
     final db = await database;
 
@@ -131,7 +150,36 @@ class LocalDB {
         "totalVolume": totalVolume,
         "totalCost": totalCost,
         "createdAt": DateTime.now().toIso8601String(),
+        // Blank entries are stored as null, not "", so "has the user filled
+        // this in?" is one check everywhere downstream.
+        "customerName": _nullIfBlank(customerName),
+        "remarks": _nullIfBlank(remarks),
       },
+    );
+  }
+
+  static String? _nullIfBlank(String? value) {
+    final trimmed = value?.trim();
+    return (trimmed == null || trimmed.isEmpty) ? null : trimmed;
+  }
+
+  static Future<void> updateStackDetails(
+    int stackId, {
+    String? name,
+    String? customerName,
+    String? remarks,
+  }) async {
+    final db = await database;
+
+    await db.update(
+      "stacks",
+      {
+        if (name != null) "name": name.trim(),
+        "customerName": _nullIfBlank(customerName),
+        "remarks": _nullIfBlank(remarks),
+      },
+      where: "id = ?",
+      whereArgs: [stackId],
     );
   }
 
