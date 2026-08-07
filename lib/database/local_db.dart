@@ -18,6 +18,23 @@ class LocalDB {
     return _database!;
   }
 
+  /// Test-only: closes and forgets the cached connection so the next access
+  /// reopens using the current [testDatabasePath].
+  ///
+  /// Without this, setting [testDatabasePath] between tests in the same file
+  /// has no effect -- the already-open database is cached statically and
+  /// every test silently shares the first one's data.
+  static Future<void> resetForTesting() async {
+    final db = _database;
+    _database = null;
+
+    if (db != null) {
+      try {
+        await db.close();
+      } catch (_) {}
+    }
+  }
+
   static Future<Database> _initDatabase() async {
     final path = testDatabasePath ??
         join(
@@ -27,7 +44,7 @@ class LocalDB {
 
     return openDatabase(
       path,
-      version: 2,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE stacks(
@@ -35,7 +52,9 @@ class LocalDB {
             name TEXT,
             totalVolume REAL,
             totalCost REAL DEFAULT 0,
-            createdAt TEXT
+            createdAt TEXT,
+            customerName TEXT,
+            remarks TEXT
           )
         ''');
 
@@ -47,7 +66,13 @@ class LocalDB {
             lengthFeet REAL,
             volume REAL,
             cost REAL DEFAULT 0,
-            createdAt TEXT
+            createdAt TEXT,
+            measurementSource TEXT,
+            rawDiameterInches REAL,
+            deductionInches REAL,
+            diameterToleranceInches REAL,
+            measurementQuality TEXT,
+            diameterProfile TEXT
           )
         ''');
       },
@@ -66,6 +91,45 @@ class LocalDB {
             "ALTER TABLE logs ADD COLUMN createdAt TEXT",
           );
         }
+
+        if (oldVersion < 3) {
+          // Measurement provenance. Without it a disputed volume can't be
+          // audited -- you can't tell whether a figure came from a sensor
+          // or a keyboard, or what allowance was applied at the time.
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN measurementSource TEXT",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN rawDiameterInches REAL",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN deductionInches REAL",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN diameterToleranceInches REAL",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN measurementQuality TEXT",
+          );
+          await db.execute(
+            "ALTER TABLE logs ADD COLUMN diameterProfile TEXT",
+          );
+        }
+
+        if (oldVersion < 4) {
+          // Who the stack is for, and anything the user wants to remember
+          // about it. Both optional -- a stack is still valid without them.
+          //
+          // Deliberately no company column: the seller's own company is a
+          // property of the user, read from their profile when a report is
+          // generated, never re-typed per stack.
+          await db.execute(
+            "ALTER TABLE stacks ADD COLUMN customerName TEXT",
+          );
+          await db.execute(
+            "ALTER TABLE stacks ADD COLUMN remarks TEXT",
+          );
+        }
       },
     );
   }
@@ -74,6 +138,8 @@ class LocalDB {
     String name,
     double totalVolume, {
     double totalCost = 0,
+    String? customerName,
+    String? remarks,
   }) async {
     final db = await database;
 
@@ -84,8 +150,58 @@ class LocalDB {
         "totalVolume": totalVolume,
         "totalCost": totalCost,
         "createdAt": DateTime.now().toIso8601String(),
+        // Blank entries are stored as null, not "", so "has the user filled
+        // this in?" is one check everywhere downstream.
+        "customerName": _nullIfBlank(customerName),
+        "remarks": _nullIfBlank(remarks),
       },
     );
+  }
+
+  static String? _nullIfBlank(String? value) {
+    final trimmed = value?.trim();
+    return (trimmed == null || trimmed.isEmpty) ? null : trimmed;
+  }
+
+  static Future<void> updateStackDetails(
+    int stackId, {
+    String? name,
+    String? customerName,
+    String? remarks,
+  }) async {
+    final db = await database;
+
+    await db.update(
+      "stacks",
+      {
+        if (name != null) "name": name.trim(),
+        "customerName": _nullIfBlank(customerName),
+        "remarks": _nullIfBlank(remarks),
+      },
+      where: "id = ?",
+      whereArgs: [stackId],
+    );
+  }
+
+  /// Audit trail for how a log's stored diameter was arrived at. All fields
+  /// are optional so every existing caller keeps working untouched; rows
+  /// written before this existed simply carry nulls.
+  static Map<String, Object?> _provenanceColumns({
+    String? measurementSource,
+    double? rawDiameterInches,
+    double? deductionInches,
+    double? diameterToleranceInches,
+    String? measurementQuality,
+    String? diameterProfile,
+  }) {
+    return {
+      "measurementSource": measurementSource,
+      "rawDiameterInches": rawDiameterInches,
+      "deductionInches": deductionInches,
+      "diameterToleranceInches": diameterToleranceInches,
+      "measurementQuality": measurementQuality,
+      "diameterProfile": diameterProfile,
+    };
   }
 
   static Future<void> addLog({
@@ -94,6 +210,12 @@ class LocalDB {
     required double lengthFeet,
     required double volume,
     double cost = 0,
+    String? measurementSource,
+    double? rawDiameterInches,
+    double? deductionInches,
+    double? diameterToleranceInches,
+    String? measurementQuality,
+    String? diameterProfile,
   }) async {
     final db = await database;
 
@@ -106,6 +228,14 @@ class LocalDB {
         "volume": volume,
         "cost": cost,
         "createdAt": DateTime.now().toIso8601String(),
+        ..._provenanceColumns(
+          measurementSource: measurementSource,
+          rawDiameterInches: rawDiameterInches,
+          deductionInches: deductionInches,
+          diameterToleranceInches: diameterToleranceInches,
+          measurementQuality: measurementQuality,
+          diameterProfile: diameterProfile,
+        ),
       },
     );
   }
@@ -116,6 +246,12 @@ class LocalDB {
     required double lengthFeet,
     required double volume,
     double cost = 0,
+    String? measurementSource,
+    double? rawDiameterInches,
+    double? deductionInches,
+    double? diameterToleranceInches,
+    String? measurementQuality,
+    String? diameterProfile,
   }) async {
     final db = await database;
 
@@ -128,6 +264,14 @@ class LocalDB {
         "volume": volume,
         "cost": cost,
         "createdAt": DateTime.now().toIso8601String(),
+        ..._provenanceColumns(
+          measurementSource: measurementSource,
+          rawDiameterInches: rawDiameterInches,
+          deductionInches: deductionInches,
+          diameterToleranceInches: diameterToleranceInches,
+          measurementQuality: measurementQuality,
+          diameterProfile: diameterProfile,
+        ),
       },
     );
   }
@@ -198,6 +342,12 @@ class LocalDB {
     required double lengthFeet,
     required double volume,
     double cost = 0,
+    String? measurementSource,
+    double? rawDiameterInches,
+    double? deductionInches,
+    double? diameterToleranceInches,
+    String? measurementQuality,
+    String? diameterProfile,
   }) async {
     final db = await database;
 
@@ -211,6 +361,14 @@ class LocalDB {
           "volume": volume,
           "cost": cost,
           "createdAt": DateTime.now().toIso8601String(),
+          ..._provenanceColumns(
+            measurementSource: measurementSource,
+            rawDiameterInches: rawDiameterInches,
+            deductionInches: deductionInches,
+            diameterToleranceInches: diameterToleranceInches,
+            measurementQuality: measurementQuality,
+            diameterProfile: diameterProfile,
+          ),
         },
       );
 

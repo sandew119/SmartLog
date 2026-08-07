@@ -2,27 +2,39 @@ import 'package:flutter/material.dart';
 
 import '../database/local_db.dart';
 import '../models/log_model.dart';
+import '../models/stack_model.dart';
 import '../repositories/stack_repository.dart';
+import '../services/user_preferences_service.dart';
+import '../utils/log_volume_pipeline.dart';
 import '../utils/timber_volume.dart';
 import '../widgets/choose_stack_sheet.dart';
 
 enum _UnitSystem { inchesFeet, centimetersMeters }
 
 class _LogRow {
-  final TextEditingController diameterController = TextEditingController();
+  final TextEditingController girthController = TextEditingController();
   final TextEditingController lengthController = TextEditingController();
-  final FocusNode diameterFocus = FocusNode();
+  final FocusNode girthFocus = FocusNode();
   final FocusNode lengthFocus = FocusNode();
 
   bool saved = false;
   int? logId;
   double cost = 0;
+
+  /// The volume for this row, live. Recomputed on every keystroke while the
+  /// row is a draft, then frozen at the value that was actually written to
+  /// the database once [saved] is true -- so what the user watched appear is
+  /// exactly what got stored.
   VolumeResult? result;
 
+  /// True once both fields hold a usable number, which is what makes the row
+  /// worth totalling and worth opening the next one for.
+  bool get isComplete => result != null && result!.cubicFeetDecimal > 0;
+
   void dispose() {
-    diameterController.dispose();
+    girthController.dispose();
     lengthController.dispose();
-    diameterFocus.dispose();
+    girthFocus.dispose();
     lengthFocus.dispose();
   }
 }
@@ -40,19 +52,27 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
   final List<_LogRow> _rows = [];
   final _priceController = TextEditingController();
 
+  /// Rows with a database write in flight. Guards against the same log being
+  /// saved twice when two commit triggers fire together.
+  final Set<_LogRow> _committing = {};
+
+  final _prefsService = UserPreferencesService.instance;
+
   _UnitSystem _unitSystem = _UnitSystem.inchesFeet;
-  VolumeMethod _method = VolumeMethod.standard;
+
+  /// Mirrors the profile setting rather than being independent state: the
+  /// toggle below writes through to the user's preferences, so the method
+  /// is the same wherever it's changed from.
+  VolumeMethod get _method => _prefsService.current.volumeMethod;
 
   int? _activeStackId;
   String? _activeStackName;
+  String? _customerName;
   bool _standaloneMode = false;
-
-  double _totalVolume = 0;
-  double _totalCost = 0;
 
   bool _initializing = true;
 
-  String get _diameterUnitLabel =>
+  String get _girthUnitLabel =>
       _unitSystem == _UnitSystem.centimetersMeters ? "cm" : "in";
 
   String get _lengthUnitLabel =>
@@ -61,14 +81,28 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
   @override
   void initState() {
     super.initState();
+    _prefsService.listenable.addListener(_onPrefsChanged);
+
+    // The running cost is derived from the price, so typing a price must
+    // repaint the total immediately, same as typing a girth does.
+    _priceController.addListener(() {
+      if (mounted) setState(() {});
+    });
+
     // Defer to after the first frame: showChooseStackSheet needs a fully
     // mounted context (showModalBottomSheet depends on Localizations),
     // which isn't available yet while still inside initState.
     WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
   }
 
+  void _onPrefsChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    _prefsService.listenable.removeListener(_onPrefsChanged);
+
     for (final row in _rows) {
       row.dispose();
     }
@@ -110,10 +144,11 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
 
     final logRows = await LocalDB.getLogsForStack(stackId);
 
+    final stack = StackModel.fromMap(stackRow);
+
     _activeStackId = stackId;
-    _activeStackName = stackRow["name"] as String? ?? "Stack";
-    _totalVolume = (stackRow["totalVolume"] as num?)?.toDouble() ?? 0;
-    _totalCost = (stackRow["totalCost"] as num?)?.toDouble() ?? 0;
+    _activeStackName = stack.name;
+    _customerName = stack.customerName;
 
     // getLogsForStack orders newest-first; show the stack's history oldest
     // to newest, matching the order logs were actually measured in.
@@ -124,32 +159,87 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
         ..saved = true
         ..logId = log.id
         ..cost = log.cost
-        ..diameterController.text = log.diameter.toStringAsFixed(2)
+        ..girthController.text =
+            TimberVolumeCalculator.girthInchesFromDiameter(log.diameter)
+                .toStringAsFixed(2)
         ..lengthController.text = log.lengthFeet.toStringAsFixed(2);
 
-      final wholeFeet = log.volume.floor();
-
-      row.result = VolumeResult(
-        cubicFeetDecimal: log.volume,
-        wholeCubicFeet: wholeFeet,
-        remainderCubicInches: ((log.volume - wholeFeet) * 1728).round(),
-      );
+      row.result = VolumeResult.fromCubicFeet(log.volume);
 
       _rows.add(row);
     }
   }
 
-  void _addEmptyRow() {
+  void _addEmptyRow({bool focus = true}) {
     final row = _LogRow();
+
+    // Live recompute on every keystroke: the volume is the whole reason the
+    // user is typing, so making them press something to see it is a tax.
+    row.girthController.addListener(() => _onRowEdited(row));
+    row.lengthController.addListener(() => _onRowEdited(row));
+
+    // Moving on from a finished row saves it. That is the click this form is
+    // really trying to remove: the user just keeps typing down the list and
+    // every log lands in the stack behind them.
+    row.lengthFocus.addListener(() {
+      if (!row.lengthFocus.hasFocus && row.isComplete && !row.saved) {
+        _commitRow(row);
+      }
+    });
 
     setState(() => _rows.add(row));
 
+    if (!focus) return;
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) row.diameterFocus.requestFocus();
+      if (mounted) row.girthFocus.requestFocus();
     });
   }
 
-  double? _parseDiameterInches(String text) {
+  /// Recomputes a draft row's volume and, once it is complete, makes sure
+  /// there is an empty row waiting underneath it.
+  void _onRowEdited(_LogRow row) {
+    if (row.saved) return;
+
+    final girth = _parseGirthInches(row.girthController.text);
+    final length = _parseLengthFeet(row.lengthController.text);
+
+    final next = (girth == null || length == null || girth <= 0 || length <= 0)
+        ? null
+        : volumeForLog(
+            prefs: _prefsService.current,
+            measuredGirthInches: girth,
+            lengthFeet: length,
+          );
+
+    if (next?.cubicFeetDecimal == row.result?.cubicFeetDecimal) return;
+
+    setState(() => row.result = next);
+
+    // Open the next row as soon as this one is usable, so a user entering a
+    // lorry-load never has to reach for an "add row" button. Only ever grows
+    // from the last row, and never steals focus -- the user is still typing.
+    if (row.isComplete && identical(row, _rows.last)) {
+      _addEmptyRow(focus: false);
+    }
+  }
+
+  /// The stack total, live: saved logs plus whatever the user is part-way
+  /// through typing. Added in the trade's own columns rather than by summing
+  /// decimals -- see [StackVolumeTotal].
+  StackVolumeTotal get _liveTotal => StackVolumeTotal.of(
+        _rows.where((row) => row.isComplete).map((row) => row.result!),
+      );
+
+  /// Cost mirrors the volume: only rows that are actually worth something.
+  double get _liveCost {
+    final price = double.tryParse(_priceController.text.trim());
+    if (price == null || price <= 0) return 0;
+
+    return _liveTotal.cubicFeetDecimal * price;
+  }
+
+  double? _parseGirthInches(String text) {
     final value = double.tryParse(text);
     if (value == null) return null;
 
@@ -166,22 +256,34 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
   }
 
   Future<void> _commitRow(_LogRow row) async {
-    if (row.saved) return;
+    if (row.saved || _committing.contains(row)) return;
 
-    final diameterInches = _parseDiameterInches(row.diameterController.text);
+    final girthInches = _parseGirthInches(row.girthController.text);
     final lengthFeet = _parseLengthFeet(row.lengthController.text);
+    final result = row.result;
 
-    if (diameterInches == null ||
+    if (girthInches == null ||
         lengthFeet == null ||
-        diameterInches <= 0 ||
-        lengthFeet <= 0) {
+        girthInches <= 0 ||
+        lengthFeet <= 0 ||
+        result == null) {
       return;
     }
 
-    final result = TimberVolumeCalculator.calculate(
-      method: _method,
-      diameterInches: diameterInches,
-      lengthFeet: lengthFeet,
+    // A row can be committed from several places at once (Done on the
+    // keyboard also drops focus, which is itself a commit trigger). Without
+    // this guard the same log is written to the database twice.
+    _committing.add(row);
+
+    // The `logs` table is diameter-canonical (the cutting optimiser and the
+    // LiDAR profile both need diameter), so the entered girth is converted
+    // on the way in and back again on the way out. The girth deduction is
+    // applied first, matching what volumeForLog already billed.
+    final storedDiameter = TimberVolumeCalculator.diameterInchesFromGirth(
+      effectiveGirthInches(
+        measuredInches: girthInches,
+        deductionInches: _prefsService.current.girthDeductionInches,
+      ),
     );
 
     final price = double.tryParse(_priceController.text);
@@ -192,7 +294,7 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
 
     if (_standaloneMode) {
       logId = await StackRepository.instance.saveStandaloneLog(
-        diameter: diameterInches,
+        diameter: storedDiameter,
         lengthFeet: lengthFeet,
         volume: result.cubicFeetDecimal,
         cost: cost,
@@ -200,28 +302,25 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
     } else {
       logId = await StackRepository.instance.addLogToStack(
         stackId: _activeStackId!,
-        diameter: diameterInches,
+        diameter: storedDiameter,
         lengthFeet: lengthFeet,
         volume: result.cubicFeetDecimal,
         cost: cost,
       );
     }
 
+    _committing.remove(row);
     if (!mounted) return;
 
     setState(() {
       row.saved = true;
       row.logId = logId;
       row.cost = cost;
-      row.result = result;
-
-      if (!_standaloneMode) {
-        _totalVolume += result.cubicFeetDecimal;
-        _totalCost += cost;
-      }
     });
 
-    _addEmptyRow();
+    // A completed row already opened the next one as it was typed; this only
+    // covers the edge case of the very last row being committed directly.
+    if (_rows.every((r) => r.saved)) _addEmptyRow(focus: false);
   }
 
   Future<void> _deleteRow(_LogRow row) async {
@@ -232,10 +331,6 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
     if (!mounted) return;
 
     setState(() {
-      if (!_standaloneMode) {
-        _totalVolume -= row.result?.cubicFeetDecimal ?? 0;
-        _totalCost -= row.cost;
-      }
       _rows.remove(row);
       row.dispose();
     });
@@ -249,10 +344,9 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
       row.dispose();
     }
     _rows.clear();
-    _totalVolume = 0;
-    _totalCost = 0;
     _activeStackId = null;
     _activeStackName = null;
+    _customerName = null;
     _standaloneMode = false;
 
     if (choice.standalone) {
@@ -280,23 +374,28 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
-              _standaloneMode
-                  ? "Saving logs individually"
-                  : (_activeStackName ?? "Stack"),
-              style: const TextStyle(fontWeight: FontWeight.bold),
-              overflow: TextOverflow.ellipsis,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _standaloneMode
+                      ? "Saving logs individually"
+                      : (_activeStackName ?? "Stack"),
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                // The running total lives in the bar at the bottom, so this
+                // space goes to who the stack is for instead.
+                if (_customerName != null)
+                  Text(
+                    _customerName!,
+                    style: const TextStyle(fontSize: 12),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+              ],
             ),
           ),
-          if (!_standaloneMode)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: Text(
-                "${_totalVolume.toStringAsFixed(2)} ft³"
-                "${_totalCost > 0 ? ' • Rs. ${_totalCost.toStringAsFixed(2)}' : ''}",
-                style: const TextStyle(fontSize: 12),
-              ),
-            ),
           TextButton(
             onPressed: _changeStack,
             child: const Text("Change"),
@@ -355,23 +454,102 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
-            title: const Text("Reference Table Volume"),
+            title: const Text("Sri Lankan Method"),
             subtitle: Text(
               _method == VolumeMethod.referenceTable
-                  ? "New logs show volume as whole cubic feet + inches (traditional timber table method)."
-                  : "New logs show volume as a decimal cubic-feet number (standard formula).",
+                  ? "Volumes shown as adi + angal, from the timber ready-reckoner."
+                  : "Volumes shown as decimal cubic feet (standard formula).",
               style: const TextStyle(fontSize: 12),
             ),
             value: _method == VolumeMethod.referenceTable,
             onChanged: (value) {
-              setState(() {
-                _method =
-                    value ? VolumeMethod.referenceTable : VolumeMethod.standard;
-              });
+              // Writes through to the profile setting so there is one source
+              // of truth; the listener installed in initState rebuilds this.
+              _prefsService.setVolumeMethod(
+                value ? VolumeMethod.referenceTable : VolumeMethod.standard,
+              );
             },
           ),
           const Divider(height: 1),
         ],
+      ),
+    );
+  }
+
+  /// One log's volume, in whichever units the user's chosen method speaks.
+  String _volumeLabel(VolumeResult? result) {
+    if (result == null) return "—";
+
+    return _method == VolumeMethod.referenceTable
+        ? result.bookDisplay
+        : "${result.cubicFeetDecimal.toStringAsFixed(3)} ft³";
+  }
+
+  /// The always-visible running total. Pinned to the bottom of the screen
+  /// rather than buried at the end of the list: on a lorry-load of logs the
+  /// list is far longer than the screen, and this is the number the user is
+  /// actually there for.
+  Widget _buildTotalBar() {
+    final total = _liveTotal;
+    final cost = _liveCost;
+    final pending = _rows.where((r) => r.isComplete && !r.saved).length;
+
+    return Material(
+      elevation: 8,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+        color: Colors.green.shade50,
+        child: SafeArea(
+          top: false,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _standaloneMode ? "Total entered" : "Stack total",
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    Text(
+                      _method == VolumeMethod.referenceTable
+                          ? total.display
+                          : "${total.cubicFeetDecimal.toStringAsFixed(3)} ft³",
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    total.logCount == 1 ? "1 log" : "${total.logCount} logs",
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  if (cost > 0)
+                    Text(
+                      "Rs. ${cost.toStringAsFixed(2)}",
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  if (pending > 0)
+                    Text(
+                      "$pending not saved yet",
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.blue.shade700,
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -387,7 +565,7 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
           const SizedBox(width: 28, child: Text("#", style: style)),
           Expanded(
             flex: 2,
-            child: Text("Diameter ($_diameterUnitLabel)", style: style),
+            child: Text("Girth ($_girthUnitLabel)", style: style),
           ),
           const SizedBox(width: 6),
           Expanded(
@@ -395,7 +573,15 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
             child: Text("Length ($_lengthUnitLabel)", style: style),
           ),
           const SizedBox(width: 6),
-          const Expanded(flex: 3, child: Text("Volume", style: style)),
+          Expanded(
+            flex: 3,
+            child: Text(
+              _method == VolumeMethod.referenceTable
+                  ? "Volume (adi · angal)"
+                  : "Volume (ft³)",
+              style: style,
+            ),
+          ),
           const SizedBox(width: 36),
         ],
       ),
@@ -419,8 +605,8 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
             flex: 2,
             child: editable
                 ? TextField(
-                    controller: row.diameterController,
-                    focusNode: row.diameterFocus,
+                    controller: row.girthController,
+                    focusNode: row.girthFocus,
                     keyboardType: const TextInputType.numberWithOptions(
                       decimal: true,
                     ),
@@ -431,7 +617,7 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
                     ),
                     onSubmitted: (_) => row.lengthFocus.requestFocus(),
                   )
-                : Text(row.diameterController.text),
+                : Text(row.girthController.text),
           ),
           const SizedBox(width: 6),
           Expanded(
@@ -456,12 +642,13 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
           Expanded(
             flex: 3,
             child: Text(
-              row.result == null
-                  ? "-"
-                  : (_method == VolumeMethod.referenceTable
-                      ? row.result!.display
-                      : "${row.result!.cubicFeetDecimal.toStringAsFixed(3)} ft³"),
-              style: const TextStyle(fontWeight: FontWeight.bold),
+              _volumeLabel(row.result),
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                // A draft reads slightly lighter than a saved row, so the
+                // user can see at a glance what has actually landed.
+                color: row.saved ? Colors.black87 : Colors.blue.shade700,
+              ),
             ),
           ),
           SizedBox(
@@ -507,11 +694,14 @@ class _ManualCalculatorScreenState extends State<ManualCalculatorScreen> {
                 _columnHeader(),
                 Expanded(
                   child: ListView.builder(
+                    // Keeps the row being typed clear of the keyboard.
+                    padding: const EdgeInsets.only(bottom: 12),
                     itemCount: _rows.length,
                     itemBuilder: (context, index) =>
                         _buildRow(index, _rows[index]),
                   ),
                 ),
+                _buildTotalBar(),
               ],
             ),
     );

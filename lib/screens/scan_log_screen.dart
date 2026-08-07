@@ -1,84 +1,56 @@
 import 'package:flutter/material.dart';
 
+import '../services/lidar_measurement_source.dart';
 import '../services/lidar_service.dart';
-import 'manual_calculator_screen.dart';
+import '../services/measurement_source.dart';
+import 'log_scan_screen.dart';
 
+/// Entry point for measuring a log. Works out how this device can measure,
+/// then hands off to [LogScanScreen] with the right measurement source.
+///
+/// The scan flow is never a dead end: a device without depth scanning gets
+/// the same guided screen with manual entry rather than an error.
 class ScanLogScreen extends StatefulWidget {
   const ScanLogScreen({super.key});
 
   @override
-  State<ScanLogScreen> createState() =>
-      _ScanLogScreenState();
+  State<ScanLogScreen> createState() => _ScanLogScreenState();
 }
 
-class _ScanLogScreenState
-    extends State<ScanLogScreen> {
-  bool checking = false;
+class _ScanLogScreenState extends State<ScanLogScreen> {
+  bool _checking = true;
+  bool _depthAvailable = false;
 
-  Future<void> startScan() async {
-    setState(() {
-      checking = true;
-    });
+  @override
+  void initState() {
+    super.initState();
+    _checkCapability();
+  }
 
+  Future<void> _checkCapability() async {
     final available =
-        await LiDARService.instance.isLiDARAvailable();
+        await LiDARService.instance.isDepthScanningAvailable();
 
     if (!mounted) return;
 
     setState(() {
-      checking = false;
+      _depthAvailable = available;
+      _checking = false;
     });
+  }
 
-    if (available) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            "LiDAR Detected. Scan module coming next.",
-          ),
-        ),
-      );
-    } else {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => AlertDialog(
-          title: const Text(
-            "LiDAR Not Available",
-          ),
-          content: const Text(
-            "This device does not support LiDAR scanning.\n\nYou can continue using Manual Measurement.",
-          ),
-          actions: [
+  void _start() {
+    final MeasurementSource source = _depthAvailable
+        ? const LidarMeasurementSource()
+        : const ManualMeasurementSource(
+            reason: "This device doesn't have a depth sensor, so enter the "
+                "log's dimensions by hand.",
+          );
 
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-              },
-              child: const Text(
-                "Cancel",
-              ),
-            ),
-
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) =>
-                        const ManualCalculatorScreen(),
-                  ),
-                );
-              },
-              child: const Text(
-                "Manual Mode",
-              ),
-            ),
-          ],
-        ),
-      );
-    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => LogScanScreen(source: source)),
+    );
   }
 
   @override
@@ -88,39 +60,45 @@ class _ScanLogScreenState
         title: const Text("Scan Log"),
         centerTitle: true,
       ),
-
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-
           child: Column(
-            mainAxisAlignment:
-                MainAxisAlignment.center,
-
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-
-              const Icon(
-                Icons.document_scanner,
-                size: 120,
+              Icon(
+                _depthAvailable ? Icons.sensors : Icons.straighten,
+                size: 110,
                 color: Colors.green,
               ),
 
               const SizedBox(height: 25),
 
               const Text(
-                "LiDAR Log Scanner",
-                style: TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.bold,
-                ),
+                "Measure a Log",
+                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
               ),
 
               const SizedBox(height: 15),
 
-              const Text(
-                "Measure timber logs automatically using LiDAR.\n\nIf your device doesn't support LiDAR, you can continue using Manual Mode.",
-                textAlign: TextAlign.center,
-              ),
+              if (_checking)
+                const Text(
+                  "Checking what this device can measure with...",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey),
+                )
+              else
+                Text(
+                  _depthAvailable
+                      ? "This device has a depth sensor. Point it at a log to "
+                          "measure its diameter and length automatically."
+                      : "This device doesn't have a depth sensor, so logs are "
+                          "measured by entering dimensions by hand. Everything "
+                          "else — stacks, volumes and reports — works the same.",
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.grey),
+                ),
 
               const SizedBox(height: 40),
 
@@ -129,37 +107,8 @@ class _ScanLogScreenState
                 height: 55,
                 child: ElevatedButton.icon(
                   icon: const Icon(Icons.play_arrow),
-                  label: checking
-                      ? const CircularProgressIndicator(
-                          color: Colors.white,
-                        )
-                      : const Text(
-                          "Start Scan",
-                        ),
-                  onPressed:
-                      checking ? null : startScan,
-                ),
-              ),
-
-              const SizedBox(height: 15),
-
-              SizedBox(
-                width: double.infinity,
-                height: 55,
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.edit),
-                  label: const Text(
-                    "Go to Manual Mode",
-                  ),
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            const ManualCalculatorScreen(),
-                      ),
-                    );
-                  },
+                  label: const Text("Start"),
+                  onPressed: _checking ? null : _start,
                 ),
               ),
             ],

@@ -5,38 +5,49 @@ import 'package:smartlog2/utils/timber_volume.dart';
 void main() {
   group('TimberVolumeCalculator', () {
     test('standard method matches Calculator.calculateVolume exactly', () {
-      const diameter = 24.0;
+      const girth = 75.0;
       const length = 12.0;
 
       final result = TimberVolumeCalculator.calculate(
         method: VolumeMethod.standard,
-        diameterInches: diameter,
+        girthInches: girth,
         lengthFeet: length,
       );
 
       final expected = Calculator.calculateVolume(
-        diameter: diameter,
+        diameter: TimberVolumeCalculator.diameterInchesFromGirth(girth),
         lengthFeet: length,
       );
 
       expect(result.cubicFeetDecimal, expected);
     });
 
+    test('girth and diameter convert round-trip without drift', () {
+      const girth = 45.0;
+
+      final diameter = TimberVolumeCalculator.diameterInchesFromGirth(girth);
+      final back = TimberVolumeCalculator.girthInchesFromDiameter(diameter);
+
+      expect(back, closeTo(girth, 1e-9));
+      // A 45in tape reading is a log a shade over 14in across.
+      expect(diameter, closeTo(14.3239, 0.0001));
+    });
+
     test(
         'reference table method uses the quarter-girth formula and gives a '
         'smaller volume than the standard cylinder formula', () {
-      const diameter = 24.0;
+      const girth = 75.0;
       const length = 12.0;
 
       final standard = TimberVolumeCalculator.calculate(
         method: VolumeMethod.standard,
-        diameterInches: diameter,
+        girthInches: girth,
         lengthFeet: length,
       );
 
       final table = TimberVolumeCalculator.calculate(
         method: VolumeMethod.referenceTable,
-        diameterInches: diameter,
+        girthInches: girth,
         lengthFeet: length,
       );
 
@@ -51,7 +62,7 @@ void main() {
         'cubic inches consistently', () {
       final result = TimberVolumeCalculator.calculate(
         method: VolumeMethod.standard,
-        diameterInches: 20,
+        girthInches: 63,
         lengthFeet: 10,
       );
 
@@ -67,17 +78,175 @@ void main() {
         'a girth of exactly 48 inches gives exactly L cubic feet with no '
         'remainder under the reference table method (quarter-girth = 1 '
         'foot exactly)', () {
-      // girth = diameter * pi, so diameter = 48 / pi gives girth = 48in.
-      final diameterForGirth48 = 48 / 3.141592653589793;
-
       final result = TimberVolumeCalculator.calculate(
         method: VolumeMethod.referenceTable,
-        diameterInches: diameterForGirth48,
+        girthInches: 48,
         lengthFeet: 7,
       );
 
       expect(result.wholeCubicFeet, 7);
       expect(result.remainderCubicInches, closeTo(0, 1));
+      expect(result.angal, 0);
+    });
+  });
+
+  group('ready-reckoner reproduction', () {
+    // Lengths down the left of every page, in feet.
+    const lengths = <double>[
+      0.25, 0.5, 0.75, //
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+      14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 30, 40,
+    ];
+
+    // Transcribed straight off the photographed pages, as (adi, angal, nul)
+    // triples in the same order as `lengths`. Keyed by the page's girth.
+    const book = <int, List<List<int>>>{
+      8: [
+        [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 0, 4], [0, 0, 8], [0, 1, 0],
+        [0, 1, 4], [0, 1, 8], [0, 2, 0], [0, 2, 4], [0, 2, 8], [0, 3, 0],
+        [0, 3, 4], [0, 3, 8], [0, 4, 0], [0, 4, 4], [0, 4, 8], [0, 5, 0],
+        [0, 5, 4], [0, 5, 8], [0, 6, 0], [0, 6, 4], [0, 6, 8], [0, 7, 0],
+        [0, 7, 4], [0, 7, 8], [0, 8, 0], [0, 8, 4], [0, 10, 0], [1, 1, 4],
+      ],
+      26: [
+        [0, 0, 10], [0, 1, 9], [0, 2, 7], [0, 3, 6], [0, 7, 0], [0, 10, 6],
+        [1, 2, 1], [1, 5, 7], [1, 9, 1], [2, 0, 7], [2, 4, 2], [2, 7, 8],
+        [2, 11, 2], [3, 2, 8], [3, 6, 3], [3, 9, 9], [4, 1, 3], [4, 4, 9],
+        [4, 8, 4], [4, 11, 10], [5, 3, 4], [5, 6, 10], [5, 10, 5], [6, 1, 11],
+        [6, 5, 5], [6, 8, 11], [7, 0, 6], [7, 4, 0], [8, 9, 7], [11, 8, 10],
+      ],
+      30: [
+        [0, 1, 2], [0, 2, 4], [0, 3, 6], [0, 4, 8], [0, 9, 4], [1, 2, 0],
+        [1, 6, 9], [1, 11, 5], [2, 4, 1], [2, 8, 9], [3, 1, 6], [3, 6, 2],
+        [3, 10, 10], [4, 3, 6], [4, 8, 3], [5, 0, 11], [5, 5, 7], [5, 10, 3],
+        [6, 3, 0], [6, 7, 8], [7, 0, 4], [7, 5, 0], [7, 9, 9], [8, 2, 5],
+        [8, 7, 1], [8, 11, 9], [9, 4, 6], [9, 9, 2], [11, 8, 7], [15, 7, 6],
+      ],
+      38: [
+        [0, 1, 10], [0, 3, 9], [0, 5, 7], [0, 7, 6], [1, 3, 0], [1, 10, 6],
+        [2, 6, 1], [3, 1, 7], [3, 9, 1], [4, 4, 7], [5, 0, 2], [5, 7, 8],
+        [6, 3, 2], [6, 10, 8], [7, 6, 3], [8, 1, 9], [8, 9, 3], [9, 4, 9],
+        [10, 0, 4], [10, 7, 10], [11, 3, 4], [11, 10, 10], [12, 6, 5],
+        [13, 1, 11], [13, 9, 5], [14, 4, 11], [15, 0, 6], [15, 8, 0],
+        [18, 9, 7], [25, 0, 10],
+      ],
+      44: [
+        [0, 2, 6], [0, 5, 0], [0, 7, 6], [0, 10, 1], [1, 8, 2], [2, 6, 3],
+        [3, 4, 4], [4, 2, 5], [5, 0, 6], [5, 10, 7], [6, 8, 8], [7, 6, 9],
+        [8, 4, 10], [9, 2, 11], [10, 1, 0], [10, 11, 1], [11, 9, 2],
+        [12, 7, 3], [13, 5, 4], [14, 3, 5], [15, 1, 6], [15, 11, 7],
+        [16, 9, 8], [17, 7, 9], [18, 5, 10], [19, 3, 11], [20, 2, 0],
+        [21, 0, 1], [25, 2, 6], [33, 7, 4],
+      ],
+      45: [
+        [0, 2, 7], [0, 5, 3], [0, 7, 10], [0, 10, 6], [1, 9, 1], [2, 7, 7],
+        [3, 6, 2], [4, 4, 8], [5, 3, 3], [6, 1, 9], [7, 0, 4], [7, 10, 11],
+        [8, 9, 5], [9, 8, 0], [10, 6, 6], [11, 5, 1], [12, 3, 7], [13, 2, 2],
+        [14, 0, 9], [14, 11, 3], [15, 9, 10], [16, 8, 4], [17, 6, 11],
+        [18, 5, 5], [19, 4, 0], [20, 2, 6], [21, 1, 1], [21, 11, 8],
+        [26, 4, 4], [35, 1, 10],
+      ],
+      47: [
+        [0, 2, 10], [0, 5, 9], [0, 8, 7], [0, 11, 6], [1, 11, 0], [2, 10, 6],
+        [3, 10, 0], [4, 9, 6], [5, 9, 0], [6, 8, 6], [7, 8, 0], [8, 7, 6],
+        [9, 7, 0], [10, 6, 6], [11, 6, 0], [12, 5, 6], [13, 5, 0], [14, 4, 6],
+        [15, 4, 1], [16, 3, 7], [17, 3, 1], [18, 2, 7], [19, 2, 1], [20, 1, 7],
+        [21, 1, 1], [22, 0, 7], [23, 0, 1], [23, 11, 7], [28, 9, 1], [38, 4, 2],
+      ],
+    };
+
+    test('nulForGirth reproduces every transcribed cell of the book', () {
+      book.forEach((girth, rows) {
+        for (var i = 0; i < lengths.length; i++) {
+          final expected = rows[i][0] * 144 + rows[i][1] * 12 + rows[i][2];
+
+          final actual = TimberVolumeCalculator.nulForGirth(
+            girthInches: girth.toDouble(),
+            lengthFeet: lengths[i],
+          );
+
+          expect(
+            actual,
+            expected,
+            reason: 'girth ${girth}in x ${lengths[i]}ft',
+          );
+        }
+      });
+    });
+
+    test('reports the book\'s adi and angal columns, with nul dropped', () {
+      // Girth 45in x 40ft is the last row of the page-45 column: 35-1-10.
+      // The app keeps 35 adi 1 angal and discards the 10 nul.
+      final result = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.referenceTable,
+        girthInches: 45,
+        lengthFeet: 40,
+      );
+
+      expect(result.adi, 35);
+      expect(result.angal, 1);
+      expect(result.bookDisplay, '35 adi 1 angal');
+    });
+
+    test('adi and angal always equal the book\'s first two columns', () {
+      // Dropping nul only ever removes the third column, so the two the app
+      // does show must still agree with the page for every cell.
+      book.forEach((girth, rows) {
+        for (var i = 0; i < lengths.length; i++) {
+          final result = TimberVolumeCalculator.calculate(
+            method: VolumeMethod.referenceTable,
+            girthInches: girth.toDouble(),
+            lengthFeet: lengths[i],
+          );
+
+          expect(
+            [result.adi, result.angal],
+            [rows[i][0], rows[i][1]],
+            reason: 'girth ${girth}in x ${lengths[i]}ft',
+          );
+        }
+      });
+    });
+
+    test('truncates to a whole nul rather than rounding up', () {
+      // 45in x 1ft is exactly 126.5625 nul. The book prints 10 angal 6 nul
+      // (=126), not 127, so this must floor even past the halfway point.
+      expect(
+        TimberVolumeCalculator.nulForGirth(girthInches: 45, lengthFeet: 1),
+        126,
+      );
+    });
+
+    test('reference-table volume lands exactly on an angal boundary', () {
+      // The billed decimal must be reconstructible from the displayed
+      // reading, otherwise the invoice disagrees with what the user was
+      // shown. 35 adi 1 angal = 421 angal.
+      final result = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.referenceTable,
+        girthInches: 45,
+        lengthFeet: 40,
+      );
+
+      expect(result.totalNul % TimberVolumeCalculator.nulPerAngal, 0);
+      expect(result.cubicFeetDecimal, 421 / 12);
+    });
+
+    test('rejects nonsense inputs instead of returning a plausible volume', () {
+      expect(
+        TimberVolumeCalculator.nulForGirth(girthInches: 0, lengthFeet: 10),
+        0,
+      );
+      expect(
+        TimberVolumeCalculator.nulForGirth(girthInches: -20, lengthFeet: 10),
+        0,
+      );
+      expect(
+        TimberVolumeCalculator.nulForGirth(
+          girthInches: double.nan,
+          lengthFeet: 10,
+        ),
+        0,
+      );
     });
   });
 }

@@ -49,6 +49,8 @@ class _ChooseStackSheetState extends State<_ChooseStackSheet> {
   int? _selectedStackId;
 
   final _newStackNameController = TextEditingController();
+  final _customerNameController = TextEditingController();
+  final _remarksController = TextEditingController();
   bool _busy = false;
 
   @override
@@ -73,6 +75,8 @@ class _ChooseStackSheetState extends State<_ChooseStackSheet> {
   @override
   void dispose() {
     _newStackNameController.dispose();
+    _customerNameController.dispose();
+    _remarksController.dispose();
     super.dispose();
   }
 
@@ -87,7 +91,11 @@ class _ChooseStackSheetState extends State<_ChooseStackSheet> {
         return;
       }
 
-      final stackId = await StackRepository.instance.createEmptyStack(name);
+      final stackId = await StackRepository.instance.createEmptyStack(
+        name,
+        customerName: _customerNameController.text,
+        remarks: _remarksController.text,
+      );
 
       if (!mounted) return;
       Navigator.pop(context, StackChoice.stack(stackId, name));
@@ -206,14 +214,42 @@ class _ChooseStackSheetState extends State<_ChooseStackSheet> {
                         onChanged: (value) =>
                             setState(() => _selectedStackId = value),
                       )
-                    else
+                    else ...[
                       TextField(
                         controller: _newStackNameController,
+                        textInputAction: TextInputAction.next,
+                        textCapitalization: TextCapitalization.words,
                         decoration: const InputDecoration(
                           labelText: "New Stack Name",
                           border: OutlineInputBorder(),
                         ),
                       ),
+                      const SizedBox(height: 12),
+                      // Both optional. Only the *customer* is asked for --
+                      // the user's own company comes from their profile when
+                      // a report is generated, never re-typed here.
+                      TextField(
+                        controller: _customerNameController,
+                        textInputAction: TextInputAction.next,
+                        textCapitalization: TextCapitalization.words,
+                        decoration: const InputDecoration(
+                          labelText: "Customer Name (optional)",
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _remarksController,
+                        textInputAction: TextInputAction.done,
+                        textCapitalization: TextCapitalization.sentences,
+                        maxLines: 2,
+                        minLines: 1,
+                        decoration: const InputDecoration(
+                          labelText: "Remarks (optional)",
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 20),
                     SizedBox(
                       height: 55,

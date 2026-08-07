@@ -44,17 +44,16 @@ Future<void> generateAndOpenReport(
       totalCost: stack.totalCost,
       createdAt: stack.createdAt,
       logs: logs,
+      customerName: stack.customerName,
+      remarks: stack.remarks,
     );
   }
 
   if (!context.mounted) return;
 
-  final company = await _resolveCompanyName(context);
-  if (company == null || !context.mounted) return;
-
   final file = await ReportService().generateStackReport(
     stack: resolvedStack,
-    company: company,
+    company: await _companyFromProfile(),
     generatedAt: DateTime.now(),
   );
 
@@ -66,72 +65,27 @@ Future<void> generateAndOpenReport(
   );
 }
 
-/// Shows an editable, Firestore-prefilled company-name dialog. Returns the
-/// confirmed name, or null if the user cancelled. Also self-heals the
-/// long-standing gap where Google sign-in always writes an empty company
-/// name, by saving any edit back to the user's Firestore doc.
-Future<String?> _resolveCompanyName(BuildContext context) async {
-  User? user;
+/// Reads the seller's company off their profile. Never prompts.
+///
+/// Generating a report used to open a company-name dialog every single time,
+/// which is a question the user has already answered on their profile. If
+/// they haven't filled it in, the report simply omits the line rather than
+/// standing between them and their PDF.
+///
+/// Returns "" when signed out, offline, or when the field was never set.
+Future<String> _companyFromProfile() async {
   try {
-    user = FirebaseAuth.instance.currentUser;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return "";
+
+    final doc = await FirebaseFirestore.instance
+        .collection("users")
+        .doc(user.uid)
+        .get();
+
+    return (doc.data()?["company"] as String? ?? "").trim();
   } catch (_) {
-    user = null;
+    // A report that prints without a letterhead beats no report at all.
+    return "";
   }
-
-  String initialCompany = "";
-
-  if (user != null) {
-    try {
-      final doc = await FirebaseFirestore.instance
-          .collection("users")
-          .doc(user.uid)
-          .get();
-
-      initialCompany = doc.data()?["company"] as String? ?? "";
-    } catch (_) {}
-  }
-
-  if (!context.mounted) return null;
-
-  final controller = TextEditingController(text: initialCompany);
-
-  final confirmed = await showDialog<bool>(
-    context: context,
-    builder: (_) => AlertDialog(
-      title: const Text("Company Name"),
-      content: TextField(
-        controller: controller,
-        decoration: const InputDecoration(
-          labelText: "Company Name",
-          hintText: "Shown on the generated report",
-          border: OutlineInputBorder(),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text("Cancel"),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, true),
-          child: const Text("Generate"),
-        ),
-      ],
-    ),
-  );
-
-  if (confirmed != true) return null;
-
-  final name = controller.text.trim();
-
-  if (user != null && name != initialCompany) {
-    try {
-      await FirebaseFirestore.instance
-          .collection("users")
-          .doc(user.uid)
-          .update({"company": name});
-    } catch (_) {}
-  }
-
-  return name;
 }

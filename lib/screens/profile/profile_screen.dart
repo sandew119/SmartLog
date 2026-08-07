@@ -2,6 +2,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../../services/google_auth_service.dart';
+import '../../widgets/measurement_settings_card.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -38,7 +39,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
         title: const Text("Profile"),
         centerTitle: true,
       ),
-      body: Padding(
+      // Scrollable rather than a fixed Column with a Spacer: the settings
+      // card below pushes the content past a small screen's height, and a
+      // Spacer in an overflowing Column throws a layout error.
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
@@ -107,11 +111,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 width: double.infinity,
                 child: ElevatedButton.icon(
                   onPressed: () async {
+                    // Captured before the await: after it, this closure's
+                    // context may belong to a widget that is gone, and the
+                    // State's own `mounted` flag does not vouch for it.
+                    final messenger = ScaffoldMessenger.of(context);
+
                     await currentUser.sendEmailVerification();
 
                     if (!mounted) return;
 
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    messenger.showSnackBar(
                       const SnackBar(
                         content: Text(
                           "Verification email sent.",
@@ -136,7 +145,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ),
             ],
 
-            const Spacer(),
+            const SizedBox(height: 20),
+
+            // Available to guests too -- measurement settings are stored
+            // locally first and only mirrored to the cloud when signed in.
+            const MeasurementSettingsCard(),
+
+            const SizedBox(height: 30),
 
             SizedBox(
               width: double.infinity,
@@ -154,6 +169,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
               ),
             ),
+
+            const SizedBox(height: 20),
           ],
         ),
       ),

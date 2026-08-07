@@ -3,11 +3,16 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
+import '../models/cutting_models.dart';
 import '../services/cutting_engine.dart';
+import '../models/log_defect.dart';
+import '../models/log_face_outline.dart';
 import '../services/lidar_service.dart';
+import '../services/user_preferences_service.dart';
 import '../widgets/cutting_setup_sheet.dart';
 import 'cutting_result_screen.dart';
 import 'lidar_measurement_screen.dart';
+import 'log_face_trace_screen.dart';
 
 enum _Stage {
   modeSelect,
@@ -33,6 +38,20 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
   bool _imageCaptured = false;
   XFile? _capturedImage;
 
+  /// The traced face, in inches, once the user has outlined the photo.
+  ///
+  /// Null means "no photo, or not traced yet", and the engine falls back to a
+  /// circle of the measured diameter -- the behaviour before any of this.
+  LogFaceOutline? _outline;
+
+  /// Flaws marked on that face. Only consulted when the profile's
+  /// "Consider defects" switch is on.
+  List<LogDefect> _defects = const [];
+
+  /// The tape reading that gave the outline its scale, carried forward so
+  /// the setup sheet can show the real measured diameter instead of a guess.
+  double? _tracedGirthInches;
+
   @override
   void initState() {
     super.initState();
@@ -40,7 +59,9 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
   }
 
   Future<void> _checkLiDAR() async {
-    final available = await LiDARService.instance.isLiDARAvailable();
+    // Feature-point AR, not depth scanning -- this flow works on any
+    // ARKit-capable iPhone, so it deliberately uses the broader check.
+    final available = await LiDARService.instance.isARAvailable();
     if (!mounted) return;
     setState(() {
       _lidarAvailable = available;
@@ -100,7 +121,46 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
     setState(() {
       _imageCaptured = false;
       _capturedImage = null;
+      // The outline belongs to the photo that was just discarded; keeping it
+      // would pack boards into the shape of a different log.
+      _outline = null;
+      _defects = const [];
+      _tracedGirthInches = null;
     });
+  }
+
+  /// Opens the tracing screen for the captured photo.
+  ///
+  /// This is what makes the photo count. Before it, the picture was only
+  /// ever attached to the PDF -- the engine packed into a circle no matter
+  /// what the log actually looked like.
+  Future<void> _traceFace(File photo) async {
+    final traced = await Navigator.push<LogFaceTraceResult?>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LogFaceTraceScreen(
+          photo: photo,
+          initialGirthInches: _tracedGirthInches,
+        ),
+      ),
+    );
+
+    if (!mounted || traced == null) return;
+
+    // The tracing screen speaks inches, because that is what the tape reads.
+    // Everything downstream of the setup sheet -- board width, blade kerf,
+    // log diameter -- is in millimetres. Converting here, at the one border
+    // between the two, keeps a 150mm board from ever being measured against
+    // a 20-unit log.
+    const mmPerInch = 25.4;
+
+    setState(() {
+      _outline = traced.outline.scaled(mmPerInch);
+      _defects = [for (final d in traced.defects) d.scaled(mmPerInch)];
+      _tracedGirthInches = traced.girthInches;
+    });
+
+    await _proceedManual(photo: photo);
   }
 
   Future<void> _openLiDARFlow() async {
@@ -137,7 +197,12 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
 
     if (input == null || !mounted) return;
 
-    final cuttingResult = CuttingEngine.generate(input);
+    final cuttingResult = CuttingEngine.generate(
+      input,
+      outline: _outline,
+      defects: _defects,
+      avoidDefects: UserPreferencesService.instance.current.avoidDefects,
+    );
 
     if (!mounted) return;
 
@@ -159,11 +224,33 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
   }
 
   Future<void> _proceedManual({File? photo}) async {
-    final input = await showCuttingSetupSheet(context);
+    final traced = _outline;
+
+    // Pre-fill from the trace so the sheet cannot show a diameter that
+    // contradicts the shape the user just outlined. Still editable: only a
+    // LiDAR reading locks the field.
+    final input = await showCuttingSetupSheet(
+      context,
+      logDimensions: traced == null
+          ? null
+          : CuttingInput(
+              logDiameter: traced.equivalentCircleDiameter,
+              logLength: 3000,
+              boardWidth: 150,
+              boardHeight: 50,
+              bladeThickness: 3,
+              boardPrice: 250,
+            ),
+    );
 
     if (input == null || !mounted) return;
 
-    final cuttingResult = CuttingEngine.generate(input);
+    final cuttingResult = CuttingEngine.generate(
+      input,
+      outline: _outline,
+      defects: _defects,
+      avoidDefects: UserPreferencesService.instance.current.avoidDefects,
+    );
 
     if (!mounted) return;
 
@@ -393,11 +480,11 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
                       const SizedBox(width: 15),
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: () => _proceedManual(
-                            photo: File(_capturedImage!.path),
+                          onPressed: () => _traceFace(
+                            File(_capturedImage!.path),
                           ),
-                          icon: const Icon(Icons.check_circle),
-                          label: const Text("Use Photo"),
+                          icon: const Icon(Icons.gesture),
+                          label: const Text("Trace Face"),
                         ),
                       ),
                     ],

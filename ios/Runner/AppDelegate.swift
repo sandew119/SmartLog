@@ -12,5 +12,14 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+
+    // The LiDAR scanner is app-local rather than a pub package, so it is
+    // registered by hand. If depth scanning reports as unavailable on a
+    // device that definitely has LiDAR, this line not running is the first
+    // thing to check -- see LidarScanner/README-VALIDATION.md.
+    if let registrar = engineBridge.pluginRegistry
+      .registrar(forPlugin: "LidarScannerPlugin") {
+      LidarScannerPlugin.register(with: registrar)
+    }
   }
 }
