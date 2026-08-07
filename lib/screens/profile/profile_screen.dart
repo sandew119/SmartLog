@@ -111,11 +111,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 width: double.infinity,
                 child: ElevatedButton.icon(
                   onPressed: () async {
+                    // Captured before the await: after it, this closure's
+                    // context may belong to a widget that is gone, and the
+                    // State's own `mounted` flag does not vouch for it.
+                    final messenger = ScaffoldMessenger.of(context);
+
                     await currentUser.sendEmailVerification();
 
                     if (!mounted) return;
 
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    messenger.showSnackBar(
                       const SnackBar(
                         content: Text(
                           "Verification email sent.",
