@@ -9,6 +9,7 @@ import 'package:image/image.dart' as img;
 import '../models/log_defect.dart';
 import '../models/log_face_outline.dart';
 import '../services/log_face_detector.dart';
+import '../utils/fitted_image_mapper.dart';
 
 /// What the user traced, in inches, ready for the cutting engine.
 class LogFaceTraceResult {
@@ -50,8 +51,16 @@ class _TraceResponse {
 /// Top-level so it can run in an isolate. Returns plain numbers rather than
 /// model objects, which keeps what crosses the isolate boundary trivial.
 _TraceResponse? _traceInBackground(_TraceRequest request) {
-  final decoded = img.decodeImage(request.bytes);
-  if (decoded == null) return null;
+  final raw = img.decodeImage(request.bytes);
+  if (raw == null) return null;
+
+  // Phone cameras almost never write pixels the right way up -- they write
+  // them sideways with an EXIF orientation tag saying how to turn them.
+  // Flutter's Image widget honours that tag, the image package does not, so
+  // without baking it in, a portrait photo decodes 4000x3000 while the user
+  // is looking at 3000x4000. Their tap would then land somewhere else
+  // entirely and the trace would come back nonsense, or nothing at all.
+  final decoded = img.bakeOrientation(raw);
 
   final detection = LogFaceDetector.detect(
     image: decoded,
@@ -101,7 +110,10 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
   final List<LogDefect> _defects = [];
 
   double _confidence = 0;
+
+  /// The photo's true pixel size, resolved before any tap is possible.
   Size? _imageSize;
+  bool _imageLoadFailed = false;
 
   bool _busy = false;
   bool _markingDefects = false;
@@ -129,6 +141,46 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
   void initState() {
     super.initState();
     _girthController.addListener(() => setState(() {}));
+    _loadImageSize();
+  }
+
+  /// Resolves the photo's true pixel dimensions before the user can tap.
+  ///
+  /// Without this the screen cannot work at all: mapping a tap into image
+  /// space needs the image's size, and the size used to be read from the
+  /// detection result -- which only runs *after* a tap has been mapped. The
+  /// first tap therefore always fell through and nothing ever happened.
+  ///
+  /// Uses the same FileImage the widget below paints, so the decode is shared
+  /// with Flutter's image cache rather than done twice.
+  Future<void> _loadImageSize() async {
+    final stream = FileImage(widget.photo).resolve(
+      const ImageConfiguration(),
+    );
+
+    late final ImageStreamListener listener;
+
+    listener = ImageStreamListener(
+      (info, _) {
+        stream.removeListener(listener);
+        if (!mounted) return;
+
+        setState(() {
+          _imageSize = Size(
+            info.image.width.toDouble(),
+            info.image.height.toDouble(),
+          );
+        });
+      },
+      onError: (error, stack) {
+        stream.removeListener(listener);
+        if (!mounted) return;
+
+        setState(() => _imageLoadFailed = true);
+      },
+    );
+
+    stream.addListener(listener);
   }
 
   @override
@@ -137,40 +189,12 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
     super.dispose();
   }
 
-  /// Maps the photo's pixel space onto the box it is displayed in.
-  ///
-  /// The image is letterboxed with BoxFit.contain, so a tap has to be
-  /// un-letterboxed before it means anything in image coordinates.
-  Rect _displayRect(Size box) {
+  /// Null until the photo's dimensions are known, which is what gates tapping.
+  FittedImageMapper? _mapperFor(Size box) {
     final image = _imageSize;
-    if (image == null) return Offset.zero & box;
+    if (image == null) return null;
 
-    final scale = math.min(box.width / image.width, box.height / image.height);
-    final w = image.width * scale;
-    final h = image.height * scale;
-
-    return Rect.fromLTWH((box.width - w) / 2, (box.height - h) / 2, w, h);
-  }
-
-  Offset? _toImageSpace(Offset local, Size box) {
-    final rect = _displayRect(box);
-    if (!rect.contains(local) || _imageSize == null) return null;
-
-    final scale = _imageSize!.width / rect.width;
-
-    return Offset(
-      (local.dx - rect.left) * scale,
-      (local.dy - rect.top) * scale,
-    );
-  }
-
-  Offset _toScreenSpace(Offset image, Size box) {
-    final rect = _displayRect(box);
-    if (_imageSize == null) return image;
-
-    final scale = rect.width / _imageSize!.width;
-
-    return Offset(rect.left + image.dx * scale, rect.top + image.dy * scale);
+    return FittedImageMapper(imageSize: image, boxSize: box);
   }
 
   Future<void> _traceFrom(Offset imagePoint) async {
@@ -191,18 +215,27 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
       return;
     }
 
+    // The size Flutter reports stays authoritative, because that is what the
+    // photo is actually painted at. If the decoder disagrees the outline
+    // would be drawn against a different coordinate space than the picture
+    // underneath it, so say so rather than showing a subtly wrong overlay.
+    final displayed = _imageSize;
+    final decodedMismatch = displayed != null &&
+        (displayed.width.round() != response.imageWidth ||
+            displayed.height.round() != response.imageHeight);
+
     setState(() {
       _busy = false;
       _confidence = response.confidence;
-      _imageSize = Size(
-        response.imageWidth.toDouble(),
-        response.imageHeight.toDouble(),
-      );
       _points = [
         for (var i = 0; i < response.flatPoints.length; i += 2)
           Offset(response.flatPoints[i], response.flatPoints[i + 1]),
       ];
     });
+
+    if (decodedMismatch) {
+      _toast("This photo's orientation is unusual — check the outline.");
+    }
   }
 
   /// Drags the nearest outline point, pulling its neighbours along with a
@@ -337,10 +370,13 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final box = Size(constraints.maxWidth, constraints.maxHeight);
+        final mapper = _mapperFor(box);
 
         void handle(Offset local, {required bool drag}) {
-          final point = _toImageSpace(local, box);
-          if (point == null || _busy) return;
+          if (mapper == null || _busy) return;
+
+          final point = mapper.toImage(local);
+          if (point == null) return;
 
           if (!_hasOutline) {
             if (!drag) _traceFrom(point);
@@ -361,20 +397,18 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
             fit: StackFit.expand,
             children: [
               Image.file(widget.photo, fit: BoxFit.contain),
-              if (_hasOutline)
+              if (_hasOutline && mapper != null)
                 CustomPaint(
                   painter: _OutlinePainter(
                     points: [
-                      for (final p in _points) _toScreenSpace(p, box),
+                      for (final p in _points) mapper.toScreen(p),
                     ],
                     handleEvery: _handleEvery,
                     defects: [
                       for (final d in _defects)
                         (
-                          centre: _toScreenSpace(d.centre, box),
-                          radius: d.radius *
-                              (_displayRect(box).width /
-                                  (_imageSize?.width ?? 1)),
+                          centre: mapper.toScreen(d.centre),
+                          radius: mapper.lengthToScreen(d.radius),
                           colour: _colourFor(d.kind),
                         ),
                     ],
@@ -393,35 +427,48 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
     );
   }
 
+  /// Pinned to the top, never the centre.
+  ///
+  /// It used to sit dead centre, which is precisely where the user has to
+  /// look and tap -- the instruction was covering the thing it was
+  /// instructing about.
   Widget _buildPrompt() {
+    final waiting = _imageSize == null && !_imageLoadFailed;
+
     return IgnorePointer(
-      child: Center(
+      child: Align(
+        alignment: Alignment.topCenter,
         child: Container(
-          margin: const EdgeInsets.all(24),
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          margin: const EdgeInsets.all(12),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.65),
-            borderRadius: BorderRadius.circular(12),
+            color: Colors.black.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(10),
           ),
-          child: const Column(
+          child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.touch_app, color: Colors.white, size: 34),
-              SizedBox(height: 10),
-              Text(
-                "Tap the middle of the cut face",
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 17,
-                  fontWeight: FontWeight.bold,
-                ),
-                textAlign: TextAlign.center,
+              Icon(
+                _imageLoadFailed
+                    ? Icons.broken_image
+                    : (waiting ? Icons.hourglass_empty : Icons.touch_app),
+                color: Colors.white,
+                size: 22,
               ),
-              SizedBox(height: 6),
-              Text(
-                "The outline is found from there. You can drag it afterwards.",
-                style: TextStyle(color: Colors.white70, fontSize: 13),
-                textAlign: TextAlign.center,
+              const SizedBox(width: 10),
+              Flexible(
+                child: Text(
+                  _imageLoadFailed
+                      ? "That photo couldn't be opened. Go back and retake it."
+                      : (waiting
+                          ? "Opening the photo…"
+                          : "Tap the middle of the cut face"),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
             ],
           ),
