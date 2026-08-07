@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/cutting_models.dart';
+import '../services/user_preferences_service.dart';
 import '../utils/calculator.dart';
 
 /// Opens the cutting setup sheet and returns the completed [CuttingInput],
@@ -50,7 +51,10 @@ class _CuttingSetupSheetState extends State<CuttingSetupSheet> {
   final bladeController = TextEditingController(text: "3");
   final boardPriceController = TextEditingController(text: "250");
 
-  bool get _logFieldsLocked => widget.logDimensions != null;
+  /// Only a sensor reading is locked. A traced outline also arrives as
+  /// [logDimensions], but the user may still want to correct it by hand --
+  /// locking it would strand anyone whose trace came out slightly off.
+  bool get _logFieldsLocked => widget.measuredViaLidar;
 
   @override
   void initState() {
@@ -151,6 +155,38 @@ class _CuttingSetupSheetState extends State<CuttingSetupSheet> {
         bladeThickness: double.parse(bladeController.text),
         boardPrice: double.parse(boardPriceController.text),
       ),
+    );
+  }
+
+  /// Reads and writes the profile setting directly, so the choice made here
+  /// is the same one the next log inherits rather than a per-sheet flag the
+  /// user has to keep re-setting.
+  Widget _defectToggle() {
+    return ValueListenableBuilder<UserPreferences>(
+      valueListenable: UserPreferencesService.instance.listenable,
+      builder: (context, prefs, _) {
+        // The sheet paints its own white rounded container, which sits
+        // between this tile and the nearest Material -- without a transparent
+        // Material of its own the switch's ink splash would be painted
+        // underneath that container and never seen.
+        return Material(
+          type: MaterialType.transparency,
+          child: SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: prefs.avoidDefects,
+            onChanged: (value) =>
+                UserPreferencesService.instance.setAvoidDefects(value),
+            title: const Text("Consider defects"),
+            subtitle: Text(
+              prefs.avoidDefects
+                  ? "Boards are routed around rot, cracks and hollows marked "
+                      "on the log face. Fewer boards, but every one is sound."
+                  : "Boards are packed across the whole face, defects and all.",
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -285,6 +321,9 @@ class _CuttingSetupSheetState extends State<CuttingSetupSheet> {
                   label: "Price per Board",
                   unit: "Rs.",
                 ),
+                const Divider(height: 24),
+                _sectionTitle("Cutting Options"),
+                _defectToggle(),
                 const SizedBox(height: 10),
                 SizedBox(
                   height: 55,
