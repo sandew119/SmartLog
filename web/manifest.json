@@ -1,6 +1,6 @@
 {
-    "name": "smartlog2",
-    "short_name": "smartlog2",
+    "name": "Smart Log",
+    "short_name": "Smart Log",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

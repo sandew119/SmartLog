@@ -26,12 +26,20 @@ Future<void> main() async {
 }
 
 class SmartLogApp extends StatelessWidget {
-  const SmartLogApp({super.key});
+  /// Overridable so the app shell can be tested without Firebase.
+  ///
+  /// [AuthGate] touches `FirebaseAuth.instance` as it builds, which throws
+  /// when Firebase has not been initialised -- as it has not in a widget
+  /// test. Injecting the first screen means the theme, title and shell are
+  /// actually covered instead of startup going untested altogether.
+  final Widget? home;
+
+  const SmartLogApp({super.key, this.home});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'SmartLog',
+      title: 'Smart Log',
       debugShowCheckedModeBanner: false,
 
       theme: ThemeData(
@@ -39,7 +47,7 @@ class SmartLogApp extends StatelessWidget {
         colorSchemeSeed: Colors.green,
       ),
 
-      home: const AuthGate(),
+      home: home ?? const AuthGate(),
     );
   }
 }

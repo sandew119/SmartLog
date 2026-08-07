@@ -39,6 +39,26 @@ dev_dependencies:
 
   flutter_lints: ^6.0.0
   sqflite_common_ffi: ^2.3.4+2
+  flutter_launcher_icons: ^0.14.3
+
+# Regenerate every platform's launcher icon with:
+#   dart run flutter_launcher_icons
+# The source is the wordmark-free square produced by tool/build_app_icon.py.
+flutter_launcher_icons:
+  image_path: "assets/logos/app_icon.png"
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  web:
+    generate: true
+  windows:
+    generate: true
+  # A maskable/adaptive icon is cropped to a circle on modern Android, so it
+  # gets the padded variant -- the viewfinder corners survive the crop.
+  # The background matches the plate baked into the artwork, so there is no
+  # seam whichever mask shape the launcher applies.
+  adaptive_icon_background: "#EBEBEB"
+  adaptive_icon_foreground: "assets/logos/app_icon_foreground.png"
 
 flutter:
   uses-material-design: true
