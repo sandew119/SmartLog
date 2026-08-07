@@ -14,11 +14,14 @@ void main() {
   });
 
   group('defaults', () {
-    test('a fresh install gets the standard method and no deduction', () async {
+    test('a fresh install gets the Sri Lankan method and no deduction',
+        () async {
       final prefs = await service.load();
 
-      expect(prefs.volumeMethod, VolumeMethod.standard);
-      expect(prefs.diameterDeductionInches, 0);
+      // The trade's own method is the default: a new user should not have to
+      // go and find it before their first log is measured correctly.
+      expect(prefs.volumeMethod, VolumeMethod.referenceTable);
+      expect(prefs.girthDeductionInches, 0);
     });
   });
 
@@ -35,29 +38,29 @@ void main() {
 
     test('a saved deduction survives a reload', () async {
       await service.load();
-      await service.setDiameterDeductionInches(1.5);
+      await service.setGirthDeductionInches(1.5);
 
       service.resetForTesting();
       final reloaded = await service.load();
 
-      expect(reloaded.diameterDeductionInches, 1.5);
+      expect(reloaded.girthDeductionInches, 1.5);
     });
 
     test('setting one preference does not clobber the other', () async {
       await service.load();
       await service.setVolumeMethod(VolumeMethod.referenceTable);
-      await service.setDiameterDeductionInches(2.5);
+      await service.setGirthDeductionInches(2.5);
 
       service.resetForTesting();
       final reloaded = await service.load();
 
       expect(reloaded.volumeMethod, VolumeMethod.referenceTable);
-      expect(reloaded.diameterDeductionInches, 2.5);
+      expect(reloaded.girthDeductionInches, 2.5);
     });
   });
 
   group('corrupt or hostile stored values', () {
-    test('an unrecognised stored method falls back to standard', () async {
+    test('an unrecognised stored method falls back to the default', () async {
       SharedPreferences.setMockInitialValues({
         "flutter.volume_method": "some_method_from_a_future_version",
       });
@@ -66,7 +69,7 @@ void main() {
 
       // Must not throw -- a corrupt value should never lock the user out of
       // their own settings screen.
-      expect(prefs.volumeMethod, VolumeMethod.standard);
+      expect(prefs.volumeMethod, VolumeMethod.referenceTable);
     });
 
     test('a negative stored deduction loads as zero', () async {
@@ -75,7 +78,7 @@ void main() {
       });
 
       final prefs = await service.load();
-      expect(prefs.diameterDeductionInches, 0);
+      expect(prefs.girthDeductionInches, 0);
     });
 
     test('an absurd stored deduction is clamped to the maximum', () async {
@@ -85,7 +88,7 @@ void main() {
 
       final prefs = await service.load();
       expect(
-        prefs.diameterDeductionInches,
+        prefs.girthDeductionInches,
         UserPreferencesService.maxDeductionInches,
       );
     });
@@ -95,19 +98,19 @@ void main() {
     test('rejects NaN and infinity, storing zero', () async {
       await service.load();
 
-      await service.setDiameterDeductionInches(double.nan);
-      expect(service.current.diameterDeductionInches, 0);
+      await service.setGirthDeductionInches(double.nan);
+      expect(service.current.girthDeductionInches, 0);
 
-      await service.setDiameterDeductionInches(double.infinity);
-      expect(service.current.diameterDeductionInches, 0);
+      await service.setGirthDeductionInches(double.infinity);
+      expect(service.current.girthDeductionInches, 0);
     });
 
     test('clamps an over-large deduction on write', () async {
       await service.load();
-      await service.setDiameterDeductionInches(99);
+      await service.setGirthDeductionInches(99);
 
       expect(
-        service.current.diameterDeductionInches,
+        service.current.girthDeductionInches,
         UserPreferencesService.maxDeductionInches,
       );
     });
@@ -123,12 +126,13 @@ void main() {
       service.listenable.addListener(listener);
       addTearDown(() => service.listenable.removeListener(listener));
 
-      await service.setVolumeMethod(VolumeMethod.referenceTable);
-      await service.setDiameterDeductionInches(1);
+      // Moves away from the default, so the notifier actually sees a change.
+      await service.setVolumeMethod(VolumeMethod.standard);
+      await service.setGirthDeductionInches(1);
 
       expect(seen.length, 2);
-      expect(seen.last.volumeMethod, VolumeMethod.referenceTable);
-      expect(seen.last.diameterDeductionInches, 1);
+      expect(seen.last.volumeMethod, VolumeMethod.standard);
+      expect(seen.last.girthDeductionInches, 1);
     });
   });
 
@@ -149,13 +153,13 @@ void main() {
       service.syncCallback = (_) async => throw Exception("offline");
 
       // Must complete normally -- the local value is the source of truth.
-      await service.setDiameterDeductionInches(2);
+      await service.setGirthDeductionInches(2);
 
-      expect(service.current.diameterDeductionInches, 2);
+      expect(service.current.girthDeductionInches, 2);
 
       service.resetForTesting();
       final reloaded = await service.load();
-      expect(reloaded.diameterDeductionInches, 2);
+      expect(reloaded.girthDeductionInches, 2);
     });
 
     test('does nothing when no sync callback is installed (guest mode)',

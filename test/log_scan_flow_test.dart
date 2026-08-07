@@ -238,7 +238,7 @@ void main() {
 
       await tester.runAsync(() async {
         await UserPreferencesService.instance.load();
-        await UserPreferencesService.instance.setDiameterDeductionInches(2);
+        await UserPreferencesService.instance.setGirthDeductionInches(2);
 
         await tester.pumpWidget(
           MaterialApp(home: LogScanScreen(source: source)),
@@ -261,11 +261,20 @@ void main() {
         final saved = await LocalDB.getStandaloneLogs();
         expect(saved.length, 1);
 
-        // Stored diameter is post-deduction, but the raw measurement and
-        // the allowance are both retained for auditing.
-        expect((saved.first["diameter"] as num).toDouble(), 18);
+        // The 2in allowance is taken off the *tape*, not the diameter: a
+        // 20in log measures 62.83in around, so 60.83in of girth remains,
+        // which is 19.36in across. The audit columns are stored in the same
+        // units as the diameter column they explain, so the invariant
+        // rawDiameterInches - deductionInches == diameter still holds.
+        expect(
+          (saved.first["diameter"] as num).toDouble(),
+          closeTo(19.363, 0.001),
+        );
         expect((saved.first["rawDiameterInches"] as num).toDouble(), 20);
-        expect((saved.first["deductionInches"] as num).toDouble(), 2);
+        expect(
+          (saved.first["deductionInches"] as num).toDouble(),
+          closeTo(0.6366, 0.0001),
+        );
       });
     },
   );

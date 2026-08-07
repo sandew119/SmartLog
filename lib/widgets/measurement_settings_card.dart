@@ -22,7 +22,7 @@ class _MeasurementSettingsCardState extends State<MeasurementSettingsCard> {
   void initState() {
     super.initState();
 
-    final current = _service.current.diameterDeductionInches;
+    final current = _service.current.girthDeductionInches;
     _deductionController = TextEditingController(
       text: current > 0 ? _trim(current) : "",
     );
@@ -45,7 +45,7 @@ class _MeasurementSettingsCardState extends State<MeasurementSettingsCard> {
     final trimmed = raw.trim();
 
     if (trimmed.isEmpty) {
-      await _service.setDiameterDeductionInches(0);
+      await _service.setGirthDeductionInches(0);
       return;
     }
 
@@ -54,7 +54,7 @@ class _MeasurementSettingsCardState extends State<MeasurementSettingsCard> {
     // "." on the way to "0.5") rather than resetting their input.
     if (parsed == null) return;
 
-    await _service.setDiameterDeductionInches(parsed);
+    await _service.setGirthDeductionInches(parsed);
   }
 
   @override
@@ -101,21 +101,22 @@ class _MeasurementSettingsCardState extends State<MeasurementSettingsCard> {
                       RadioListTile<VolumeMethod>(
                         contentPadding: EdgeInsets.zero,
                         dense: true,
-                        value: VolumeMethod.standard,
-                        title: Text("Standard Volume"),
+                        value: VolumeMethod.referenceTable,
+                        title: Text("Sri Lankan Method (ගණ අඩි)"),
                         subtitle: Text(
-                          "True cylinder volume, shown as decimal cubic feet.",
+                          "Quarter-girth measure from the timber "
+                          "ready-reckoner, shown as adi + angal exactly as "
+                          "the book prints them.",
                           style: TextStyle(fontSize: 12),
                         ),
                       ),
                       RadioListTile<VolumeMethod>(
                         contentPadding: EdgeInsets.zero,
                         dense: true,
-                        value: VolumeMethod.referenceTable,
-                        title: Text("Reference Table Volume"),
+                        value: VolumeMethod.standard,
+                        title: Text("Standard Method"),
                         subtitle: Text(
-                          "Traditional quarter-girth timber measure, shown as "
-                          "cubic feet plus cubic inches.",
+                          "True cylinder volume, shown as decimal cubic feet.",
                           style: TextStyle(fontSize: 12),
                         ),
                       ),
@@ -132,13 +133,13 @@ class _MeasurementSettingsCardState extends State<MeasurementSettingsCard> {
                   ),
                   onChanged: _onDeductionChanged,
                   decoration: const InputDecoration(
-                    labelText: "Diameter Deduction",
+                    labelText: "Girth Deduction",
                     hintText: "0",
                     suffixText: "inches",
                     isDense: true,
                     border: OutlineInputBorder(),
                     helperText:
-                        "Subtracted from each measured diameter (e.g. a bark "
+                        "Subtracted from each girth measurement (e.g. a bark "
                         "allowance) before volume is calculated.",
                     helperMaxLines: 3,
                   ),

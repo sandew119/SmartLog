@@ -7,13 +7,13 @@ import 'timber_volume.dart';
 /// screen: this is the calculation money changes hands over, so it must be
 /// unit-testable in isolation.
 
-/// Applies the user's trade/bark allowance to a measured diameter.
+/// Applies the user's trade/bark allowance to a measured girth.
 ///
 /// Returns 0 rather than a negative number when the deduction meets or
-/// exceeds the measurement -- a negative diameter would square back into a
+/// exceeds the measurement -- a negative girth would square back into a
 /// positive, plausible-looking volume, which is exactly the kind of silent
 /// wrong answer that must never reach an invoice.
-double effectiveDiameterInches({
+double effectiveGirthInches({
   required double measuredInches,
   required double deductionInches,
 }) {
@@ -30,15 +30,15 @@ double effectiveDiameterInches({
 }
 
 /// Computes a log's volume using the user's configured method and
-/// deduction. Length is used as-is; only the diameter carries an allowance.
+/// deduction. Length is used as-is; only the girth carries an allowance.
 VolumeResult volumeForLog({
   required UserPreferences prefs,
-  required double measuredDiameterInches,
+  required double measuredGirthInches,
   required double lengthFeet,
 }) {
-  final diameter = effectiveDiameterInches(
-    measuredInches: measuredDiameterInches,
-    deductionInches: prefs.diameterDeductionInches,
+  final girth = effectiveGirthInches(
+    measuredInches: measuredGirthInches,
+    deductionInches: prefs.girthDeductionInches,
   );
 
   final safeLength =
@@ -46,7 +46,7 @@ VolumeResult volumeForLog({
           ? 0.0
           : lengthFeet;
 
-  if (diameter <= 0 || safeLength <= 0) {
+  if (girth <= 0 || safeLength <= 0) {
     return const VolumeResult(
       cubicFeetDecimal: 0,
       wholeCubicFeet: 0,
@@ -56,7 +56,7 @@ VolumeResult volumeForLog({
 
   return TimberVolumeCalculator.calculate(
     method: prefs.volumeMethod,
-    diameterInches: diameter,
+    girthInches: girth,
     lengthFeet: safeLength,
   );
 }

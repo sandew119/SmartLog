@@ -29,8 +29,8 @@ void main() {
     await service.load();
     await pumpCard(tester);
 
-    expect(find.text("Standard Volume"), findsOneWidget);
-    expect(find.text("Reference Table Volume"), findsOneWidget);
+    expect(find.text("Sri Lankan Method (ගණ අඩි)"), findsOneWidget);
+    expect(find.text("Standard Method"), findsOneWidget);
 
     final selected = tester
         .widgetList<RadioGroup<VolumeMethod>>(
@@ -38,18 +38,19 @@ void main() {
         )
         .single;
 
-    expect(selected.groupValue, VolumeMethod.standard);
+    // The trade's own method is what a user gets without going looking.
+    expect(selected.groupValue, VolumeMethod.referenceTable);
   });
 
   testWidgets('choosing a method persists it to preferences', (tester) async {
     await service.load();
     await pumpCard(tester);
 
-    await tester.tap(find.text("Reference Table Volume"));
+    await tester.tap(find.text("Standard Method"));
     await tester.pump();
     await tester.pump();
 
-    expect(service.current.volumeMethod, VolumeMethod.referenceTable);
+    expect(service.current.volumeMethod, VolumeMethod.standard);
   });
 
   testWidgets('typing a deduction persists it', (tester) async {
@@ -60,20 +61,20 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(service.current.diameterDeductionInches, 2.5);
+    expect(service.current.girthDeductionInches, 2.5);
   });
 
   testWidgets('clearing the deduction field resets it to zero',
       (tester) async {
     await service.load();
-    await service.setDiameterDeductionInches(3);
+    await service.setGirthDeductionInches(3);
     await pumpCard(tester);
 
     await tester.enterText(find.byType(TextField), "");
     await tester.pump();
     await tester.pump();
 
-    expect(service.current.diameterDeductionInches, 0);
+    expect(service.current.girthDeductionInches, 0);
   });
 
   testWidgets('an over-large typed deduction is clamped, not stored raw',
@@ -86,7 +87,7 @@ void main() {
     await tester.pump();
 
     expect(
-      service.current.diameterDeductionInches,
+      service.current.girthDeductionInches,
       UserPreferencesService.maxDeductionInches,
     );
   });
@@ -94,7 +95,7 @@ void main() {
   testWidgets('a partially-typed decimal does not wipe the stored value',
       (tester) async {
     await service.load();
-    await service.setDiameterDeductionInches(2);
+    await service.setGirthDeductionInches(2);
     await pumpCard(tester);
 
     // "." alone is un-parseable; it must be ignored rather than resetting
@@ -103,16 +104,48 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(service.current.diameterDeductionInches, 2);
+    expect(service.current.girthDeductionInches, 2);
   });
 
   testWidgets('shows an existing deduction pre-filled', (tester) async {
     SharedPreferences.setMockInitialValues({
-      "flutter.diameter_deduction_inches": 1.5,
+      "flutter.girth_deduction_inches": 1.5,
     });
     await service.load();
     await pumpCard(tester);
 
     expect(find.text("1.5"), findsOneWidget);
+  });
+
+  testWidgets(
+    'converts a pre-girth deduction so the allowance keeps its real size',
+    (tester) async {
+      // The old setting was 1.5in off the diameter. Wrapped around the log
+      // that is the same cut as 4.71in off the tape -- carrying the number
+      // across unchanged would silently shrink the allowance to a third.
+      SharedPreferences.setMockInitialValues({
+        "flutter.diameter_deduction_inches": 1.5,
+      });
+
+      await service.load();
+      await pumpCard(tester);
+
+      expect(service.current.girthDeductionInches, closeTo(4.712, 0.001));
+      expect(find.textContaining("4.71"), findsOneWidget);
+    },
+  );
+
+  testWidgets('migrates a legacy deduction only once', (tester) async {
+    SharedPreferences.setMockInitialValues({
+      "flutter.diameter_deduction_inches": 1.5,
+    });
+
+    await service.load();
+    // The user then clears it. A second load must respect that, not
+    // resurrect the legacy value.
+    await service.setGirthDeductionInches(0);
+    await service.load();
+
+    expect(service.current.girthDeductionInches, 0);
   });
 }

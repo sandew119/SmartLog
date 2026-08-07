@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../utils/timber_volume.dart';
+
 /// Where a log's dimensions came from. Persisted so a disputed volume can
 /// be audited later -- for a commercial product that's a requirement, not a
 /// nicety.
@@ -162,6 +164,28 @@ class LogMeasurement {
     if (tolerance == null || tolerance <= 0) return base;
 
     return "$base ±${tolerance.toStringAsFixed(1)} in";
+  }
+
+  /// The scanner measures across the log; the trade and the ready-reckoner
+  /// both work around it. This is the only figure the user should ever see.
+  double get minGirthInches =>
+      TimberVolumeCalculator.girthInchesFromDiameter(minDiameterInches);
+
+  /// Formatted girth with its uncertainty band, e.g. "44.6 in ±0.9 in".
+  ///
+  /// The tolerance is scaled too -- a ±0.3 in band on the diameter is a
+  /// ±0.94 in band once it is wrapped around the log, and quoting the
+  /// unscaled figure would overstate the scan's precision.
+  String get girthDisplay {
+    final base = "${minGirthInches.toStringAsFixed(1)} in";
+    final tolerance = diameterToleranceInches;
+
+    if (tolerance == null || tolerance <= 0) return base;
+
+    final girthTolerance =
+        TimberVolumeCalculator.girthInchesFromDiameter(tolerance);
+
+    return "$base ±${girthTolerance.toStringAsFixed(1)} in";
   }
 
   /// Encodes the profile for the `logs.diameterProfile` TEXT column.

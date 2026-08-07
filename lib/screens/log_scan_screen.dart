@@ -120,7 +120,7 @@ class _LogScanScreenState extends State<LogScanScreen> {
         ? null
         : volumeForLog(
             prefs: _prefsService.current,
-            measuredDiameterInches: measurement.minDiameterInches,
+            measuredGirthInches: measurement.minGirthInches,
             lengthFeet: measurement.lengthFeet,
           );
   }
@@ -224,11 +224,24 @@ class _LogScanScreenState extends State<LogScanScreen> {
 
     final prefs = _prefsService.current;
 
+    // The deduction is a tape allowance, so it is applied in girth and only
+    // then converted back: the `logs` table stores diameter because the
+    // cutting optimiser and the LiDAR profile both need it.
+    //
     // The stored diameter is post-deduction; the raw measurement and the
-    // allowance ride along as provenance so the figure can be audited.
-    final storedDiameter = effectiveDiameterInches(
-      measuredInches: measurement.minDiameterInches,
-      deductionInches: prefs.diameterDeductionInches,
+    // allowance ride along as provenance so the figure can be audited. The
+    // allowance is recorded in the same units as the column it explains, so
+    // rawDiameterInches - deductionInches == diameter still holds.
+    final effectiveGirth = effectiveGirthInches(
+      measuredInches: measurement.minGirthInches,
+      deductionInches: prefs.girthDeductionInches,
+    );
+
+    final storedDiameter =
+        TimberVolumeCalculator.diameterInchesFromGirth(effectiveGirth);
+
+    final storedDeduction = TimberVolumeCalculator.diameterInchesFromGirth(
+      prefs.girthDeductionInches,
     );
 
     if (_standaloneMode || _activeStackId == null) {
@@ -238,7 +251,7 @@ class _LogScanScreenState extends State<LogScanScreen> {
         volume: volume.cubicFeetDecimal,
         cost: cost,
         measurement: measurement,
-        deductionInches: prefs.diameterDeductionInches,
+        deductionInches: storedDeduction,
       );
     } else {
       await StackRepository.instance.addLogToStack(
@@ -248,7 +261,7 @@ class _LogScanScreenState extends State<LogScanScreen> {
         volume: volume.cubicFeetDecimal,
         cost: cost,
         measurement: measurement,
-        deductionInches: prefs.diameterDeductionInches,
+        deductionInches: storedDeduction,
       );
     }
 
@@ -388,7 +401,7 @@ class _LogScanScreenState extends State<LogScanScreen> {
     final volume = _volume!;
     final prefs = _prefsService.current;
 
-    final deduction = prefs.diameterDeductionInches;
+    final deduction = prefs.girthDeductionInches;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
@@ -410,7 +423,7 @@ class _LogScanScreenState extends State<LogScanScreen> {
 
             const SizedBox(height: 12),
 
-            _statRow("Diameter (thinnest)", measurement.diameterDisplay),
+            _statRow("Girth (thinnest)", measurement.girthDisplay),
             _statRow(
               "Length",
               "${measurement.lengthFeet.toStringAsFixed(2)} ft",
@@ -419,7 +432,7 @@ class _LogScanScreenState extends State<LogScanScreen> {
             if (deduction > 0)
               _statRow(
                 "After deduction",
-                "${effectiveDiameterInches(measuredInches: measurement.minDiameterInches, deductionInches: deduction).toStringAsFixed(1)} in "
+                "${effectiveGirthInches(measuredInches: measurement.minGirthInches, deductionInches: deduction).toStringAsFixed(1)} in "
                     "(−${deduction.toStringAsFixed(1)} in)",
               ),
 
