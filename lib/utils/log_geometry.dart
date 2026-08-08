@@ -48,6 +48,20 @@ class CrossSection {
   final double angularSpanRadians;
   final int pointCount;
 
+  /// Perimeter traced through the surface actually observed, in metres.
+  ///
+  /// This is what a tape laid around the log reads. It follows the real
+  /// out-of-round shape instead of assuming a circle, so on anything but a
+  /// perfectly round log it exceeds `pi * diameter`.
+  ///
+  /// Falls back to the fitted circle's circumference when the slice was
+  /// too sparse to trace.
+  final double tracedPerimeter;
+
+  /// Fraction of the way around the section that was actually seen, 0..1.
+  /// The remainder was completed from the fitted circle.
+  final double observedFraction;
+
   const CrossSection({
     required this.axialPosition,
     required this.center,
@@ -55,7 +69,9 @@ class CrossSection {
     required this.rmsResidual,
     required this.angularSpanRadians,
     required this.pointCount,
-  });
+    double? tracedPerimeter,
+    this.observedFraction = 0,
+  }) : tracedPerimeter = tracedPerimeter ?? 2 * math.pi * radius;
 
   double get diameter => radius * 2;
 
@@ -92,6 +108,11 @@ class LogProfile {
 
   List<double> get diametersMetres =>
       sections.map((s) => s.diameter).toList(growable: false);
+
+  /// Traced perimeter of every accepted section, ordered along the axis --
+  /// the girth series the trade actually bills on.
+  List<double> get perimetersMetres =>
+      sections.map((s) => s.tracedPerimeter).toList(growable: false);
 
   /// Smallest angular span among accepted sections -- the limiting factor
   /// for how much the whole profile can be trusted.
@@ -283,6 +304,171 @@ class LogGeometry {
     return span < 0 ? 0 : span;
   }
 
+  /// How many angular bins a traced section is divided into.
+  ///
+  /// 72 bins is one every 5 degrees: fine enough to follow the lobes and
+  /// flats of a real log, coarse enough that each bin still collects several
+  /// depth samples and its median stays robust.
+  static const int traceBinCount = 72;
+
+  /// Traces the perimeter of one cross-section through the observed points.
+  ///
+  /// A tape measure follows the log's real outline, so a circle-derived
+  /// girth understates every log that is not truly round -- and no log is.
+  /// This walks the section in angular bins, taking a *median* radius in
+  /// each (so bark flakes and stray depth samples cannot push the outline
+  /// out), and completes any unobserved arc with the fitted circle.
+  ///
+  /// Returns null when there is not enough of the section to trace, leaving
+  /// the caller to fall back to the circle.
+  static ({double perimeter, double observedFraction})? tracePerimeter(
+    List<Vector2> points,
+    Vector2 center,
+    double fittedRadius, {
+    int bins = traceBinCount,
+  }) {
+    if (points.length < 8 || bins < 8) return null;
+    if (!fittedRadius.isFinite || fittedRadius <= 0) return null;
+
+    final binRadii = List.generate(bins, (_) => <double>[]);
+    final binWidth = 2 * math.pi / bins;
+
+    for (final p in points) {
+      final dx = p.x - center.x;
+      final dy = p.y - center.y;
+      final radius = math.sqrt(dx * dx + dy * dy);
+
+      if (!radius.isFinite || radius <= 0) continue;
+
+      // Reject anything wildly off the fitted circle before it can drag a
+      // bin's median: that is a neighbouring log or a depth artefact, not
+      // this log's surface.
+      if (radius > fittedRadius * radialGateFactor) continue;
+      if (radius < fittedRadius / radialGateFactor) continue;
+
+      var angle = math.atan2(dy, dx);
+      if (angle < 0) angle += 2 * math.pi;
+
+      final index = (angle / binWidth).floor().clamp(0, bins - 1);
+      binRadii[index].add(radius);
+    }
+
+    var observed = 0;
+    final radii = List<double>.filled(bins, fittedRadius);
+
+    for (var i = 0; i < bins; i++) {
+      final samples = binRadii[i];
+      if (samples.isEmpty) continue;
+
+      samples.sort();
+      radii[i] = samples[samples.length ~/ 2];
+      observed++;
+    }
+
+    if (observed == 0) return null;
+
+    // Sum the chords of the closed polygon through one vertex per bin.
+    var perimeter = 0.0;
+    for (var i = 0; i < bins; i++) {
+      final j = (i + 1) % bins;
+
+      final a = radii[i];
+      final b = radii[j];
+
+      // Law of cosines on the two radii and the angle between bin centres.
+      final squared = a * a + b * b - 2 * a * b * math.cos(binWidth);
+      perimeter += math.sqrt(squared <= 0 ? 0 : squared);
+    }
+
+    // An inscribed polygon is always shorter than the curve it samples. For
+    // a circle the shortfall is exactly sin(pi/n)/(pi/n), so correcting by
+    // its reciprocal makes a round log trace to exactly pi*d and leaves a
+    // lobed one very close to its true perimeter.
+    final chordCorrection = (math.pi / bins) / math.sin(math.pi / bins);
+
+    final corrected = perimeter * chordCorrection;
+    if (!corrected.isFinite || corrected <= 0) return null;
+
+    return (perimeter: corrected, observedFraction: observed / bins);
+  }
+
+  /// The extent of an isolated log along its own dominant direction.
+  ///
+  /// Once the log has been segmented away from the ground and its
+  /// neighbours, its long axis is simply the principal direction of what is
+  /// left -- so the user no longer has to tap both ends to say where the log
+  /// starts and stops. One tap to choose the log is enough.
+  ///
+  /// Returns null for a cloud with no clear long direction, which is the
+  /// honest answer for a blob that is not log-shaped.
+  static ({Vector3 start, Vector3 end})? principalExtent(
+    List<Vector3> points, {
+    double minLengthMetres = 0.20,
+  }) {
+    if (points.length < 12) return null;
+
+    var mean = Vector3.zero();
+    for (final p in points) {
+      mean += p;
+    }
+    mean = mean / points.length.toDouble();
+
+    // Seed the power iteration with the widest pair of extremes along the
+    // cardinal axes, so it starts near the true long direction rather than
+    // somewhere that takes many iterations to escape.
+    final seedDirection = _widestCardinalSpread(points, mean);
+    if (seedDirection == null) return null;
+
+    var direction = seedDirection;
+
+    for (var iter = 0; iter < 16; iter++) {
+      var next = Vector3.zero();
+
+      for (final p in points) {
+        final d = p - mean;
+        next += d * d.dot(direction);
+      }
+
+      final length = next.length;
+      if (length < 1e-12 || !length.isFinite) return null;
+
+      direction = next / length;
+    }
+
+    var min = double.infinity;
+    var max = double.negativeInfinity;
+
+    for (final p in points) {
+      final along = (p - mean).dot(direction);
+      if (along < min) min = along;
+      if (along > max) max = along;
+    }
+
+    if (!min.isFinite || !max.isFinite) return null;
+    if (max - min < minLengthMetres) return null;
+
+    return (
+      start: mean + direction * min,
+      end: mean + direction * max,
+    );
+  }
+
+  static Vector3? _widestCardinalSpread(List<Vector3> points, Vector3 mean) {
+    var spread = Vector3.zero();
+
+    for (final p in points) {
+      final d = p - mean;
+      spread += Vector3(d.x.abs(), d.y.abs(), d.z.abs());
+    }
+
+    if (spread.length < 1e-12) return null;
+
+    // Start along whichever cardinal axis the cloud is most stretched on.
+    if (spread.x >= spread.y && spread.x >= spread.z) return Vector3(1, 0, 0);
+    if (spread.y >= spread.z) return Vector3(0, 1, 0);
+    return Vector3(0, 0, 1);
+  }
+
   /// Builds a diameter profile along the log.
   ///
   /// [seedStart]/[seedEnd] are the user's two taps. They land on the log's
@@ -362,20 +548,30 @@ class LogGeometry {
   static double? minDiameterFromProfile(
     List<double> diameters, {
     int medianWindow = 3,
+  }) =>
+      medianSmoothedMinimum(diameters, medianWindow: medianWindow);
+
+  /// Smallest value in a noisy series, taken after median smoothing.
+  ///
+  /// Used for both the diameter and the traced-girth series: in each case a
+  /// raw minimum would just pick whichever slice fitted worst.
+  static double? medianSmoothedMinimum(
+    List<double> values, {
+    int medianWindow = 3,
   }) {
-    if (diameters.isEmpty) return null;
-    if (diameters.length < medianWindow || medianWindow < 3) {
-      return diameters.reduce((a, b) => a < b ? a : b);
+    if (values.isEmpty) return null;
+    if (values.length < medianWindow || medianWindow < 3) {
+      return values.reduce((a, b) => a < b ? a : b);
     }
 
     final half = medianWindow ~/ 2;
     double? smallest;
 
-    for (var i = 0; i < diameters.length; i++) {
+    for (var i = 0; i < values.length; i++) {
       final start = math.max(0, i - half);
-      final end = math.min(diameters.length, i + half + 1);
+      final end = math.min(values.length, i + half + 1);
 
-      final window = diameters.sublist(start, end)..sort();
+      final window = values.sublist(start, end)..sort();
       final median = window[window.length ~/ 2];
 
       if (smallest == null || median < smallest) smallest = median;
@@ -460,6 +656,8 @@ class LogGeometry {
           basis.u * fit.center.x +
           basis.v * fit.center.y;
 
+      final trace = tracePerimeter(points, fit.center, fit.radius);
+
       final section = CrossSection(
         axialPosition: bucketAxial[i],
         center: centre3d,
@@ -467,6 +665,8 @@ class LogGeometry {
         rmsResidual: fit.rmsResidual,
         angularSpanRadians: fit.angularSpanRadians,
         pointCount: fit.pointCount,
+        tracedPerimeter: trace?.perimeter,
+        observedFraction: trace?.observedFraction ?? 0,
       );
 
       if (fit.angularSpanRadians >= minAngularSpanRadians) {

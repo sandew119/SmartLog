@@ -84,16 +84,28 @@ class _LogScanScreenState extends State<LogScanScreen> {
       return;
     }
 
+    // Deliberately does NOT ask which stack to use yet. That question used
+    // to greet the user before they had measured anything -- a decision
+    // about filing work that did not exist. It is asked at save time
+    // instead, when there is a log in hand and the answer is obvious.
     if (mounted) setState(() => _initializing = false);
+  }
+
+  /// Ensures somewhere to file the log, asking only if it is still unknown.
+  Future<bool> _ensureDestination() async {
+    if (_standaloneMode || _activeStackId != null) return true;
 
     final choice = await showChooseStackSheet(context);
-    if (!mounted) return;
+    if (!mounted) return false;
 
     if (choice.standalone) {
       setState(() => _standaloneMode = true);
     } else {
       await _loadStack(choice.stackId!);
+      if (!mounted) return false;
     }
+
+    return true;
   }
 
   Future<void> _loadStack(int stackId) async {
@@ -213,6 +225,9 @@ class _LogScanScreenState extends State<LogScanScreen> {
     if (measurement == null || volume == null || _busy) return;
 
     if (!await _passesQualityGate(measurement)) return;
+    if (!mounted) return;
+
+    if (!await _ensureDestination()) return;
     if (!mounted) return;
 
     setState(() => _busy = true);

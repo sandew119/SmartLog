@@ -77,6 +77,17 @@ class LidarScannerService {
     } catch (_) {}
   }
 
+  /// Stops folding new frames into the accumulated cloud.
+  ///
+  /// Called before capturing so the cloud cannot shift underneath the
+  /// measurement while it is being read.
+  Future<void> stopSweep(int viewId) async {
+    try {
+      await MethodChannel("smartlog/lidar_scanner/view_$viewId")
+          .invokeMethod<void>("stopSweep");
+    } catch (_) {}
+  }
+
   /// Captures the current depth frame as a world-space point cloud.
   ///
   /// Returns null on any failure -- caller falls back to manual entry.

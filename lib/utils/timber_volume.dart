@@ -170,6 +170,26 @@ class TimberVolumeCalculator {
   /// hair under it in binary floating point and lose a whole nul.
   static const double epsilon = 1e-9;
 
+  /// The trade reads a tape down to the *completed* inch and a length down to
+  /// the *completed* foot before ever opening the ready-reckoner: a log that
+  /// tapes 26.9 in is bought as 26 in, and one that runs 4.9 ft is bought as
+  /// 4 ft. It is truncation, never rounding -- 4.1 ft and 4.9 ft are both 4.
+  ///
+  /// This is a measurement *policy*, applied here on the way into the book
+  /// rather than inside [nulForGirth], which stays a pure transcription of
+  /// the printed table so it can still be verified cell-for-cell against it.
+  ///
+  /// Applied only under [VolumeMethod.referenceTable]. The standard cylinder
+  /// method is a geometric answer, not a trade one, and stays continuous.
+  static double toCompletedUnit(double value) {
+    if (value.isNaN || value.isInfinite || value <= 0) return 0;
+
+    // Without the epsilon a girth of a mathematically exact 26 in that
+    // arrived via pi as 25.999999999 would be bought as 25 -- a whole inch
+    // given away to a floating-point artefact.
+    return (value + epsilon).floorToDouble();
+  }
+
   static VolumeResult calculate({
     required VolumeMethod method,
     required double girthInches,
@@ -177,8 +197,8 @@ class TimberVolumeCalculator {
   }) {
     final double cubicFeet = method == VolumeMethod.referenceTable
         ? _referenceTable(
-            girthInches: girthInches,
-            lengthFeet: lengthFeet,
+            girthInches: toCompletedUnit(girthInches),
+            lengthFeet: toCompletedUnit(lengthFeet),
           )
         : Calculator.calculateVolume(
             diameter: diameterInchesFromGirth(girthInches),

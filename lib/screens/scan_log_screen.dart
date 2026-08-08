@@ -37,6 +37,12 @@ class _ScanLogScreenState extends State<ScanLogScreen> {
       _depthAvailable = available;
       _checking = false;
     });
+
+    // Nothing on this screen asks the user anything -- it only works out
+    // which measurement source the device supports. Making them read it and
+    // press Start put a whole screen between tapping "Scan Log" and seeing
+    // a camera, so it now shows only for as long as the check takes.
+    _start();
   }
 
   void _start() {
@@ -47,7 +53,9 @@ class _ScanLogScreenState extends State<ScanLogScreen> {
                 "log's dimensions by hand.",
           );
 
-    Navigator.push(
+    // Replace rather than push: going back from the scan screen should
+    // return home, not to a screen that would immediately forward again.
+    Navigator.pushReplacement(
       context,
       MaterialPageRoute(builder: (_) => LogScanScreen(source: source)),
     );

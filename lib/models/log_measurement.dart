@@ -34,6 +34,14 @@ class LogMeasurement {
 
   final int crossSectionCount;
 
+  /// Girth traced around the log's real cross-section, in inches.
+  ///
+  /// This is what a tape reads. Where it is available it replaces the
+  /// circle-derived girth entirely, because assuming a circular section
+  /// understates every log that is not perfectly round -- and none are.
+  /// Null for manual entry and for scans too sparse to trace.
+  final double? tracedGirthInches;
+
   /// Mean radial residual of the circle fits, in millimetres. Higher means
   /// a rougher or noisier surface.
   final double? meanResidualMm;
@@ -54,6 +62,7 @@ class LogMeasurement {
     this.crossSectionCount = 0,
     this.meanResidualMm,
     this.minAngularSpanDegrees,
+    this.tracedGirthInches,
   });
 
   /// Hand-typed dimensions. Quality is not scored -- the user asserted
@@ -168,8 +177,22 @@ class LogMeasurement {
 
   /// The scanner measures across the log; the trade and the ready-reckoner
   /// both work around it. This is the only figure the user should ever see.
-  double get minGirthInches =>
-      TimberVolumeCalculator.girthInchesFromDiameter(minDiameterInches);
+  ///
+  /// Prefers the traced perimeter over the circle assumption whenever the
+  /// scan was good enough to produce one.
+  double get minGirthInches {
+    final traced = tracedGirthInches;
+    if (traced != null && traced.isFinite && traced > 0) return traced;
+
+    return TimberVolumeCalculator.girthInchesFromDiameter(minDiameterInches);
+  }
+
+  /// Whether the girth above came from tracing the real outline rather than
+  /// from assuming the section is a circle.
+  bool get girthIsTraced {
+    final traced = tracedGirthInches;
+    return traced != null && traced.isFinite && traced > 0;
+  }
 
   /// Formatted girth with its uncertainty band, e.g. "44.6 in ±0.9 in".
   ///

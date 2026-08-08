@@ -1,14 +1,19 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/lidar_scanner_service.dart';
 
-/// Hosts the native AR view and walks the user through marking a log's two
-/// ends, then captures a depth frame.
+/// Hosts the native AR view and guides one continuous sweep of a log.
+///
+/// The flow is deliberately two beats long: tap the log, then walk its
+/// length. Everything else -- separating the log from the ground, finding
+/// its axis, deciding when enough has been gathered -- is the app's job.
 ///
 /// Returns a [PointCloudCapture] via `Navigator.pop`, or null if the user
 /// backed out or the session failed. All geometry happens afterwards in
-/// Dart -- this screen only collects points.
+/// Dart; this screen only collects points.
 class LidarCaptureScreen extends StatefulWidget {
   const LidarCaptureScreen({super.key});
 
@@ -16,17 +21,55 @@ class LidarCaptureScreen extends StatefulWidget {
   State<LidarCaptureScreen> createState() => _LidarCaptureScreenState();
 }
 
-class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
-  int? _viewId;
+enum _Stage { aiming, sweeping, finishing }
 
-  int _tapCount = 0;
+/// Live progress reported by the native accumulator.
+class _SweepProgress {
+  final int pointCount;
+  final double extentMetres;
+
+  const _SweepProgress({this.pointCount = 0, this.extentMetres = 0});
+}
+
+class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
+  /// Enough surface to fit circles along a log with confidence. Below this
+  /// the sweep is still usable but the quality gate will likely refuse it.
+  static const int _targetPointCount = 12000;
+
+  /// A log shorter than this is almost certainly a mis-tap on something
+  /// else, so the sweep is not considered complete until it is exceeded.
+  static const double _minPlausibleLengthMetres = 0.5;
+
+  /// The sweep finishes on its own once coverage stops growing for this
+  /// long. Waiting for the user to decide they are done is one more thing
+  /// to explain and one more tap to make.
+  static const Duration _plateauBeforeFinish = Duration(milliseconds: 1600);
+
+  /// Growth below this between updates counts as "not growing".
+  static const double _plateauToleranceMetres = 0.02;
+
+  int? _viewId;
+  _Stage _stage = _Stage.aiming;
+
+  _SweepProgress _progress = const _SweepProgress();
+
   String? _error;
   String? _hint;
   bool _capturing = false;
 
+  double _bestExtent = 0;
+  DateTime? _lastGrowth;
+  Timer? _plateauTimer;
+
+  @override
+  void dispose() {
+    _plateauTimer?.cancel();
+    super.dispose();
+  }
+
   void _onPlatformViewCreated(int id) {
-    // Listen on the per-view channel so native taps and session failures
-    // reach the UI.
+    // Listen on the per-view channel so native taps, progress and session
+    // failures reach the UI.
     MethodChannel("smartlog/lidar_scanner/view_$id")
         .setMethodCallHandler(_handleNativeCall);
 
@@ -39,10 +82,16 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
     switch (call.method) {
       case "tapped":
         setState(() {
-          _tapCount += 1;
+          _stage = _Stage.sweeping;
           _hint = null;
           _error = null;
+          _bestExtent = 0;
+          _lastGrowth = DateTime.now();
         });
+        _startPlateauWatch();
+
+      case "progress":
+        _onProgress(call.arguments);
 
       case "tapMissed":
         final args = call.arguments;
@@ -68,16 +117,75 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
     return null;
   }
 
-  Future<void> _redoTaps() async {
+  void _onProgress(Object? arguments) {
+    if (arguments is! Map) return;
+
+    final points = arguments["pointCount"];
+    final extent = arguments["extent"];
+
+    final progress = _SweepProgress(
+      pointCount: points is num ? points.toInt() : 0,
+      extentMetres: extent is num ? extent.toDouble() : 0,
+    );
+
+    if (progress.extentMetres > _bestExtent + _plateauToleranceMetres) {
+      _bestExtent = progress.extentMetres;
+      _lastGrowth = DateTime.now();
+    }
+
+    setState(() => _progress = progress);
+  }
+
+  /// Watches for the sweep to stop improving, then finishes it.
+  void _startPlateauWatch() {
+    _plateauTimer?.cancel();
+
+    _plateauTimer = Timer.periodic(
+      const Duration(milliseconds: 300),
+      (_) {
+        if (!mounted || _stage != _Stage.sweeping) return;
+        if (!_hasEnoughToMeasure) return;
+
+        final since = _lastGrowth;
+        if (since == null) return;
+
+        if (DateTime.now().difference(since) >= _plateauBeforeFinish) {
+          _capture();
+        }
+      },
+    );
+  }
+
+  bool get _hasEnoughToMeasure =>
+      _progress.pointCount >= _targetPointCount &&
+      _bestExtent >= _minPlausibleLengthMetres;
+
+  /// How far along the sweep is, for the progress ring.
+  double get _completion {
+    if (_stage == _Stage.aiming) return 0;
+
+    final byPoints = _progress.pointCount / _targetPointCount;
+    final byLength = _bestExtent / _minPlausibleLengthMetres;
+
+    final worst = byPoints < byLength ? byPoints : byLength;
+    return worst.clamp(0.0, 1.0);
+  }
+
+  Future<void> _redo() async {
     final id = _viewId;
     if (id == null) return;
 
+    _plateauTimer?.cancel();
     await LidarScannerService.instance.clearTaps(id);
     if (!mounted) return;
 
     setState(() {
-      _tapCount = 0;
+      _stage = _Stage.aiming;
+      _progress = const _SweepProgress();
+      _bestExtent = 0;
+      _lastGrowth = null;
       _hint = null;
+      _error = null;
     });
   }
 
@@ -85,25 +193,36 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
     final id = _viewId;
     if (id == null || _capturing) return;
 
-    setState(() => _capturing = true);
+    _plateauTimer?.cancel();
+
+    setState(() {
+      _capturing = true;
+      _stage = _Stage.finishing;
+    });
+
+    // Freeze the cloud first: letting it grow while it is being read would
+    // measure something slightly different from what was on screen.
+    await LidarScannerService.instance.stopSweep(id);
 
     final capture = await LidarScannerService.instance.capture(id);
 
     if (!mounted) return;
 
-    setState(() => _capturing = false);
-
     if (capture == null) {
       setState(() {
+        _capturing = false;
+        _stage = _Stage.sweeping;
         _error = "Could not read depth data. Move closer to the log, "
             "avoid direct sunlight, and try again.";
       });
       return;
     }
 
-    if (capture.taps.length < 2) {
+    if (capture.taps.isEmpty) {
       setState(() {
-        _error = "Both ends of the log need to be marked before capturing.";
+        _capturing = false;
+        _stage = _Stage.aiming;
+        _error = "Tap the log you want to measure first.";
       });
       return;
     }
@@ -111,14 +230,28 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
     Navigator.pop(context, capture);
   }
 
-  String get _instruction {
+  String get _headline {
     if (_error != null) return _error!;
     if (_hint != null) return _hint!;
 
-    return switch (_tapCount) {
-      0 => "Tap one end of the log.",
-      1 => "Now tap the other end.",
-      _ => "Both ends marked. Stand square to the log, then capture.",
+    return switch (_stage) {
+      _Stage.aiming => "Tap the log you want to measure.",
+      _Stage.sweeping => _hasEnoughToMeasure
+          ? "Good. Hold still — finishing."
+          : "Now walk slowly along the log.",
+      _Stage.finishing => "Measuring…",
+    };
+  }
+
+  String get _subtitle {
+    return switch (_stage) {
+      _Stage.aiming =>
+        "Stand 0.7–1.5 m away. The app separates the log from the ground "
+            "and from the logs beside it.",
+      _Stage.sweeping =>
+        "Keep it in frame from end to end. The more of its curve the "
+            "sensor sees, the tighter the girth.",
+      _Stage.finishing => "Working out girth, length and volume.",
     };
   }
 
@@ -153,43 +286,18 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
             ),
           ),
 
+          if (_stage == _Stage.aiming) const _AimingReticle(),
+
           Positioned(
             top: 0,
             left: 0,
             right: 0,
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              color: Colors.black54,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    "Step ${_tapCount >= 2 ? 3 : _tapCount + 1} of 3",
-                    style: const TextStyle(
-                      color: Colors.greenAccent,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    _instruction,
-                    style: TextStyle(
-                      color: _error != null
-                          ? Colors.orangeAccent
-                          : Colors.white,
-                      fontSize: 16,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    "Stand 0.7–1.5 m away, square to the log. Avoid direct "
-                    "sunlight — it swamps the depth sensor.",
-                    style: TextStyle(color: Colors.white70, fontSize: 12),
-                  ),
-                ],
-              ),
+            child: _GuidanceBanner(
+              headline: _headline,
+              subtitle: _subtitle,
+              isError: _error != null,
+              completion: _completion,
+              showProgress: _stage != _Stage.aiming,
             ),
           ),
 
@@ -206,10 +314,11 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
                   children: [
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: _tapCount > 0 ? _redoTaps : null,
+                        onPressed:
+                            _stage == _Stage.aiming || _capturing ? null : _redo,
                         icon: const Icon(Icons.refresh, color: Colors.white),
                         label: const Text(
-                          "Redo",
+                          "Start over",
                           style: TextStyle(color: Colors.white),
                         ),
                       ),
@@ -217,8 +326,12 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
                     const SizedBox(width: 15),
                     Expanded(
                       child: ElevatedButton.icon(
-                        onPressed:
-                            (_tapCount >= 2 && !_capturing) ? _capture : null,
+                        // Always available once a log is chosen: the sweep
+                        // finishes itself, but a user who can see they are
+                        // done should never have to wait for it.
+                        onPressed: (_stage == _Stage.sweeping && !_capturing)
+                            ? _capture
+                            : null,
                         icon: _capturing
                             ? const SizedBox(
                                 width: 18,
@@ -229,7 +342,9 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
                                 ),
                               )
                             : const Icon(Icons.straighten),
-                        label: const Text("Measure"),
+                        label: Text(
+                          _hasEnoughToMeasure ? "Done" : "Measure now",
+                        ),
                       ),
                     ),
                   ],
@@ -238,6 +353,92 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A crosshair shown while the user is choosing which log to measure.
+class _AimingReticle extends StatelessWidget {
+  const _AimingReticle();
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: Center(
+        child: Container(
+          width: 96,
+          height: 96,
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.greenAccent, width: 2),
+            borderRadius: BorderRadius.circular(48),
+          ),
+          child: const Icon(
+            Icons.touch_app,
+            color: Colors.greenAccent,
+            size: 32,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GuidanceBanner extends StatelessWidget {
+  final String headline;
+  final String subtitle;
+  final bool isError;
+  final double completion;
+  final bool showProgress;
+
+  const _GuidanceBanner({
+    required this.headline,
+    required this.subtitle,
+    required this.isError,
+    required this.completion,
+    required this.showProgress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      color: Colors.black54,
+      child: SafeArea(
+        bottom: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              headline,
+              style: TextStyle(
+                color: isError ? Colors.orangeAccent : Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              subtitle,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+            if (showProgress) ...[
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: completion,
+                  minHeight: 6,
+                  backgroundColor: Colors.white24,
+                  valueColor: const AlwaysStoppedAnimation<Color>(
+                    Colors.greenAccent,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

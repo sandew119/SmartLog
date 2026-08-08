@@ -89,14 +89,9 @@ void main() {
           MaterialApp(home: LogScanScreen(source: source)),
         );
 
-        // The user is asked about a stack before measuring anything.
-        await pumpUntilFound(tester, find.text("Start a Stack?"));
-
-        await tester.tap(find.text("Continue Without a Stack"));
-        await pumpUntilFound(tester, find.text("Saving logs individually"));
-        await pumpUntilGone(tester, find.text("Start a Stack?"));
-
-        expect(find.text("Measure Log"), findsOneWidget);
+        // Measuring comes first: nothing is asked before there is a log.
+        await pumpUntilFound(tester, find.text("Measure Log"));
+        expect(find.text("Start a Stack?"), findsNothing);
 
         await tester.tap(find.text("Measure Log"));
         await pumpUntilFound(tester, find.text("Measured Log"));
@@ -106,7 +101,11 @@ void main() {
         // Diameter is shown with its uncertainty band, not as a bare number.
         expect(find.textContaining("±"), findsOneWidget);
 
-        await tester.tap(find.text("Save Log"));
+        // Only now is the user asked where it goes.
+        await tester.tap(find.text("Add to Stack"));
+        await pumpUntilFound(tester, find.text("Start a Stack?"));
+
+        await tester.tap(find.text("Continue Without a Stack"));
         // Result card is cleared and the screen is ready for the next log.
         await pumpUntilGone(tester, find.text("Measured Log"));
 
@@ -131,6 +130,12 @@ void main() {
           MaterialApp(home: LogScanScreen(source: source)),
         );
 
+        await pumpUntilFound(tester, find.text("Measure Log"));
+
+        await tester.tap(find.text("Measure Log"));
+        await pumpUntilFound(tester, find.text("Measured Log"));
+
+        await tester.tap(find.text("Add to Stack"));
         await pumpUntilFound(tester, find.text("Start a Stack?"));
 
         // No stacks exist yet, so the sheet opens straight on "new stack".
@@ -144,17 +149,12 @@ void main() {
 
         await tester.tap(find.text("Create Stack"));
 
-        // The stack is now active, shown in the bottom bar.
+        // The stack is now active and the log is filed into it: the bottom
+        // bar names it and counts the log in one go.
         await pumpUntilFound(tester, find.text("Yard A"));
         await pumpUntilGone(tester, find.text("Create Stack"));
         expect(find.text("Saving logs individually"), findsNothing);
 
-        await tester.tap(find.text("Measure Log"));
-        await pumpUntilFound(tester, find.text("Add to Stack"));
-
-        await tester.tap(find.text("Add to Stack"));
-
-        // Bottom bar reflects the saved log.
         await pumpUntilFound(tester, find.textContaining("1 logs"));
 
         final stacks = await LocalDB.getStacks();
@@ -176,16 +176,17 @@ void main() {
           MaterialApp(home: LogScanScreen(source: source)),
         );
 
-        await pumpUntilFound(tester, find.text("Start a Stack?"));
-
-        await tester.tap(find.text("Continue Without a Stack"));
         await pumpUntilFound(tester, find.text("Measure Log"));
 
         await tester.tap(find.text("Measure Log"));
         await pumpUntilFound(tester, find.text("Unreliable"));
 
-        await tester.tap(find.text("Save Log"));
+        await tester.tap(find.text("Add to Stack"));
         await pumpUntilFound(tester, find.text("Measurement Not Reliable"));
+
+        // The refusal comes before the user is asked where to file it:
+        // there is no point choosing a home for a log that will not be kept.
+        expect(find.text("Start a Stack?"), findsNothing);
 
         await tester.tap(find.text("Close"));
         await pumpUntilGone(tester, find.text("Measurement Not Reliable"));
@@ -210,18 +211,19 @@ void main() {
           MaterialApp(home: LogScanScreen(source: source)),
         );
 
-        await pumpUntilFound(tester, find.text("Start a Stack?"));
-
-        await tester.tap(find.text("Continue Without a Stack"));
         await pumpUntilFound(tester, find.text("Measure Log"));
 
         await tester.tap(find.text("Measure Log"));
         await pumpUntilFound(tester, find.text("Check"));
 
-        await tester.tap(find.text("Save Log"));
+        await tester.tap(find.text("Add to Stack"));
         await pumpUntilFound(tester, find.text("Check This Measurement"));
 
         await tester.tap(find.text("Save Anyway"));
+
+        // Confirmed, so now it asks where the log belongs.
+        await pumpUntilFound(tester, find.text("Start a Stack?"));
+        await tester.tap(find.text("Continue Without a Stack"));
         await pumpUntilGone(tester, find.text("Measured Log"));
 
         final saved = await LocalDB.getStandaloneLogs();
@@ -244,9 +246,6 @@ void main() {
           MaterialApp(home: LogScanScreen(source: source)),
         );
 
-        await pumpUntilFound(tester, find.text("Start a Stack?"));
-
-        await tester.tap(find.text("Continue Without a Stack"));
         await pumpUntilFound(tester, find.text("Measure Log"));
 
         await tester.tap(find.text("Measure Log"));
@@ -255,7 +254,10 @@ void main() {
         // The deduction is shown explicitly, not applied invisibly.
         expect(find.textContaining("After deduction"), findsOneWidget);
 
-        await tester.tap(find.text("Save Log"));
+        await tester.tap(find.text("Add to Stack"));
+        await pumpUntilFound(tester, find.text("Start a Stack?"));
+
+        await tester.tap(find.text("Continue Without a Stack"));
         await pumpUntilGone(tester, find.text("Measured Log"));
 
         final saved = await LocalDB.getStandaloneLogs();

@@ -188,11 +188,16 @@ void main() {
       expect(result.bookDisplay, '35 adi 1 angal');
     });
 
-    test('adi and angal always equal the book\'s first two columns', () {
+    test(
+        'adi and angal equal the book\'s first two columns at every whole '
+        'foot', () {
       // Dropping nul only ever removes the third column, so the two the app
-      // does show must still agree with the page for every cell.
+      // does show must still agree with the page for every cell the trade
+      // actually buys on -- i.e. every completed foot.
       book.forEach((girth, rows) {
         for (var i = 0; i < lengths.length; i++) {
+          if (lengths[i] != lengths[i].floorToDouble()) continue;
+
           final result = TimberVolumeCalculator.calculate(
             method: VolumeMethod.referenceTable,
             girthInches: girth.toDouble(),
@@ -206,6 +211,120 @@ void main() {
           );
         }
       });
+    });
+
+    test('a part-foot log is bought at the completed foot below it', () {
+      // The policy stated in trade terms: anything between 4 and 5 feet is
+      // a 4-foot log. Checked against the book's own printed rows so this
+      // is anchored to real data, not just to the formula.
+      book.forEach((girth, rows) {
+        final fourFootRow = rows[lengths.indexOf(4)];
+
+        for (final partial in const <double>[4.0, 4.1, 4.5, 4.9, 4.99]) {
+          final result = TimberVolumeCalculator.calculate(
+            method: VolumeMethod.referenceTable,
+            girthInches: girth.toDouble(),
+            lengthFeet: partial,
+          );
+
+          expect(
+            [result.adi, result.angal],
+            [fourFootRow[0], fourFootRow[1]],
+            reason: 'girth ${girth}in x ${partial}ft should bill as 4ft',
+          );
+        }
+      });
+    });
+
+    test('a part-inch girth is bought at the completed inch below it', () {
+      // 26.9in tapes as a 26in log, exactly as 26.0in does.
+      final atWholeInch = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.referenceTable,
+        girthInches: 26,
+        lengthFeet: 10,
+      );
+
+      for (final partial in const <double>[26.0, 26.01, 26.5, 26.99]) {
+        final result = TimberVolumeCalculator.calculate(
+          method: VolumeMethod.referenceTable,
+          girthInches: partial,
+          lengthFeet: 10,
+        );
+
+        expect(
+          [result.adi, result.angal],
+          [atWholeInch.adi, atWholeInch.angal],
+          reason: '${partial}in girth should bill as 26in',
+        );
+      }
+    });
+
+    test('truncation never rounds up across a boundary', () {
+      // The failure that would cost a buyer money: 4.99ft billed as 5ft.
+      final asFive = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.referenceTable,
+        girthInches: 45,
+        lengthFeet: 5,
+      );
+      final asAlmostFive = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.referenceTable,
+        girthInches: 45,
+        lengthFeet: 4.99,
+      );
+
+      expect(asAlmostFive.cubicFeetDecimal, lessThan(asFive.cubicFeetDecimal));
+    });
+
+    test('a girth arriving irrationally via pi still bills at its whole inch',
+        () {
+      // The LiDAR path derives girth as diameter * pi, so a log that is
+      // mathematically exactly 36in around can land at 35.999999999. Without
+      // the epsilon guard that log would silently be bought as 35in.
+      final viaPi = TimberVolumeCalculator.girthInchesFromDiameter(
+        TimberVolumeCalculator.diameterInchesFromGirth(36),
+      );
+
+      final result = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.referenceTable,
+        girthInches: viaPi,
+        lengthFeet: 12,
+      );
+      final exact = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.referenceTable,
+        girthInches: 36,
+        lengthFeet: 12,
+      );
+
+      expect(result.cubicFeetDecimal, exact.cubicFeetDecimal);
+    });
+
+    test('the standard cylinder method is left continuous', () {
+      // Truncation is a trade rule for the book, not a geometric one. A
+      // 4.9ft log must not collapse to 4ft under the standard method.
+      final full = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.standard,
+        girthInches: 45.7,
+        lengthFeet: 4.9,
+      );
+      final truncated = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.standard,
+        girthInches: 45,
+        lengthFeet: 4,
+      );
+
+      expect(full.cubicFeetDecimal, greaterThan(truncated.cubicFeetDecimal));
+    });
+
+    test('a log under one foot has no billable length under the book', () {
+      // An honest consequence of whole-foot truncation, pinned so it can
+      // never happen by accident: a 9-inch offcut bills as nothing.
+      final result = TimberVolumeCalculator.calculate(
+        method: VolumeMethod.referenceTable,
+        girthInches: 45,
+        lengthFeet: 0.75,
+      );
+
+      expect(result.cubicFeetDecimal, 0);
     });
 
     test('truncates to a whole nul rather than rounding up', () {

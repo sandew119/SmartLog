@@ -33,6 +33,11 @@ migrate_working_dir/
 /build/
 /coverage/
 
+# A second, older copy of this project that ended up nested inside it. It
+# carries its own .git, so committing it would either bloat this repo by
+# ~169MB or leave a broken gitlink behind.
+/SmartLog/
+
 # Symbolication related
 app.*.symbols
 
