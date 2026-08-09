@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="si"><head><meta charset="utf-8">
+<title>Smart Log — Code Flow</title><style>
+@page { size: A4; margin: 16mm 14mm; }
+body {
+  font-family: "Iskoola Pota", "Nirmala UI", sans-serif;
+  font-size: 10.5pt; line-height: 1.55; color: #1a1a1a; margin: 0;
+}
+h1 {
+  font-size: 17pt; color: #1B5E20; border-bottom: 2.5px solid #1B5E20;
+  padding-bottom: 5px; margin: 22px 0 12px; page-break-after: avoid;
+  page-break-before: always;
+}
+h1:first-of-type { page-break-before: avoid; }
+h2 {
+  font-size: 13.5pt; color: #2E7D32; margin: 18px 0 8px;
+  page-break-after: avoid;
+}
+h3 {
+  font-size: 11.5pt; color: #388E3C; margin: 14px 0 6px;
+  page-break-after: avoid;
+}
+p { margin: 7px 0; text-align: justify; }
+ul { margin: 6px 0 6px 18px; }
+li { margin: 3px 0; }
+code {
+  font-family: Consolas, monospace; background: #eef2ee;
+  padding: 1px 4px; border-radius: 3px; font-size: 9.5pt;
+}
+.codeblock { margin: 10px 0; page-break-inside: avoid; }
+.cap {
+  font-family: Consolas, monospace; font-size: 8pt; color: #fff;
+  background: #37474F; padding: 3px 9px;
+  border-radius: 4px 4px 0 0; display: inline-block;
+}
+pre {
+  font-family: Consolas, monospace; font-size: 8.4pt; line-height: 1.4;
+  background: #FAFAF7; border: 1px solid #d8ddd8;
+  border-left: 3px solid #2E7D32;
+  padding: 9px 11px; margin: 0; white-space: pre-wrap;
+  word-break: break-word; border-radius: 0 4px 4px 4px;
+}
+pre.text { border-left-color: #607D8B; background: #F5F7F8; }
+table {
+  width: 100%; border-collapse: collapse; margin: 10px 0;
+  font-size: 9pt; page-break-inside: avoid;
+}
+th {
+  background: #2E7D32; color: #fff; text-align: left;
+  padding: 6px 8px; font-weight: 600;
+}
+td { border: 1px solid #d5dbd5; padding: 5px 8px; vertical-align: top; }
+tr:nth-child(even) td { background: #F7F9F7; }
+.note, .warn {
+  padding: 9px 12px; margin: 10px 0; border-radius: 4px;
+  page-break-inside: avoid; font-size: 10pt;
+}
+.note { background: #E8F5E9; border-left: 4px solid #2E7D32; }
+.warn { background: #FFF4E5; border-left: 4px solid #EF6C00; }
+.pb { page-break-after: always; }
+.title { text-align: center; padding: 30px 0 10px; }
+.title h1 {
+  border: none; font-size: 30pt; margin: 0; color: #1B5E20;
+}
+.title .sub { font-size: 14pt; margin-top: 6px; font-weight: 600; }
+.title .meta { font-size: 10pt; color: #555; margin-top: 14px; }
+</style></head><body>
+<div class="title">
+  <h1>Smart Log</h1>
+  <div class="sub">සම්පූර්ණ Code Flow සහ Database පැහැදිලි කිරීම</div>
+  <div class="meta">Tech Titans · Rajarata University of Sri Lanka<br>
+  Dart lines 19,145 · Tests 327 · SQLite tables 8</div>
+</div>
+<div class="note">මේ ලේඛනයේ තියෙන <b>හැම code කැබැල්ලක්ම ඇත්ත ගොනු වලින්
+කෙළින්ම උපුටාගත් ඒවා</b> — අතින් ලියපු ඒවා නොවේ. ඒ නිසා ලේඛනයයි code
+එකයි අතර වෙනසක් ඇති වෙන්න බෑ.</div>
+<h1>1. App එක පණ ගැන්වෙන තැන — main.dart</h1>
+<p>App එක විවෘත කරද්දී පිළිවෙළින් සිදු වන දේ. මේ පිළිවෙළ වැදගත්: settings මුලින්ම load වෙන්නේ නැත්නම් පළමු screen එක වැරදි ක්‍රමයකින් volume එකක් පෙන්නන්න පුළුවන්.</p>
+<div class="codeblock"><div class="cap">lib/main.dart</div><pre class="dart">Future&lt;void&gt; main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
+  // Load measurement settings before the first frame so no screen ever
+  // renders a volume using the wrong method, and route settings changes into
+  // the sync queue. A settings failure must never block app start.
+  try {
+    await UserPreferencesService.instance.load();
+    UserPreferencesService.instance.syncCallback =
+        (_) =&gt; CloudSyncEngine.instance.queueSettings();
+  } catch (_) {}
+
+  // Anything left in the queue from a previous run goes now: the app may
+  // have been killed mid-upload, or closed in a yard with no signal.
+  unawaited(CloudSyncEngine.instance.drain());
+
+  // Watches for sign-in, so a fresh install restores its data and everything
+  // already on this phone gets swept up to the cloud once.
+  CloudSyncCoordinator.instance.start();
+
+  // Signs out a session left open on a phone put down in a yard. Wired here
+  // rather than in the auth screens so there is exactly one place that
+  // decides what &quot;idle&quot; means.
+  SessionTimeoutService.instance.onTimeout = () async {
+    SessionTimeoutService.instance.stop();
+    await GoogleAuthService.instance.signOut();
+  };
+
+  runApp(const SessionActivityDetector(child: SmartLogApp()));</pre></div>
+<p>පේළියෙන් පේළිය:</p>
+<table><thead><tr><th>පේළිය</th><th>කරන දේ</th><th>ඇයි?</th></tr></thead><tbody><tr><td>Firebase.initializeApp</td><td>Firebase එක ආරම්භ කරනවා</td><td>මේක නැතුව FirebaseAuth.instance කැඩෙනවා</td></tr><tr><td>UserPreferencesService.load()</td><td>Settings load කරනවා</td><td>පළමු frame එකට කලින්. නැත්නම් වැරදි volume method එකකින් පෙන්නනවා</td></tr><tr><td>syncCallback</td><td>Settings වෙනස් වුණාම queue එකට</td><td>Settings ත් cloud එකට යනවා</td></tr><tr><td>CloudSyncEngine.drain()</td><td>පරණ queue එක යවනවා</td><td>App එක කලින් මරලා තියෙන්න පුළුවන් — upload එක මැද්දේ</td></tr><tr><td>CloudSyncCoordinator.start()</td><td>Sign-in බලාගෙන ඉන්නවා</td><td>Restore සහ backfill ට</td></tr><tr><td>SessionTimeoutService.onTimeout</td><td>Logout callback එක</td><td>'නිකම් තියෙනවා' කියන්නේ මොකක්ද කියලා තීරණය කරන එකම තැන</td></tr></tbody></table>
+<div class="note"><b>SessionActivityDetector</b> එකෙන් මුළු app එකම wrap කරලා තියෙනවා. ඒක <code>Listener</code> එකක් මිසක් <code>GestureDetector</code> එකක් නොවේ — ඒ නිසා යටින් තියෙන button එකකට යන tap එකක් ඒක ගිලලා දාන්නේ නෑ.</div>
+<h1>2. Database — සම්පූර්ණ පැහැදිලි කිරීම</h1>
+<h2>2.1 Database එක විවෘත වන ආකාරය</h2>
+<div class="codeblock"><div class="cap">lib/database/local_db.dart</div><pre class="dart">static Future&lt;Database&gt; get database async {
+  if (_database != null) {
+    return _database!;
+  }
+
+  _database = await _initDatabase();
+  return _database!;
+}</pre></div>
+<p><b>Lazy</b> — database එක ඕන වෙන පළමු මොහොත වන තුරු විවෘත වෙන්නේ නෑ. ඒ නිසා අලුතෙන් install කරපු phone එකක, screen එකකට යන තුරු database ගොනුවක්ම හැදෙන්නේ නෑ.</p>
+<h2>2.2 Version constant එක</h2>
+<div class="codeblock"><div class="cap">Magic number එකක් නොවේ</div><pre class="dart">/// The migration version this build of the code expects.
+///
+/// Named rather than repeated, so the version passed to [openDatabase] and
+/// the version anything else checks against cannot drift apart -- which is
+/// precisely the bug a schema-version display exists to catch.
+static const int schemaVersion = 7;</pre></div>
+<p>ඇයි constant එකක්? <code>openDatabase</code> එකට යවන version එකයි, developer screen එකේ compare කරන version එකයි එකම එකක් වෙන්න ඕන. දෙකක් වෙන වෙනම ලිව්වොත් ඒවා අතර වෙනසක් ඇති වෙන්න පුළුවන් — සහ ඒක තමයි schema version display එකක් තියෙන්නේම හොයාගන්න.</p>
+<h2>2.3 Tables — CREATE TABLE කේතය</h2>
+<h3>stacks — ලෝග් කට්ටලයක්</h3>
+<div class="codeblock"><div class="cap">onCreate</div><pre class="dart">  CREATE TABLE stacks(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    totalVolume REAL,
+    totalCost REAL DEFAULT 0,
+    createdAt TEXT,
+    customerName TEXT,
+    remarks TEXT,
+    cloudId TEXT
+  )
+&#x27;&#x27;&#x27;);</pre></div>
+<h3>logs — එක ලෝග් එකක්</h3>
+<div class="codeblock"><div class="cap">onCreate</div><pre class="dart">  CREATE TABLE logs(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stackId INTEGER,
+    diameter REAL,
+    lengthFeet REAL,
+    volume REAL,
+    cost REAL DEFAULT 0,
+    createdAt TEXT,
+    measurementSource TEXT,
+    rawDiameterInches REAL,
+    deductionInches REAL,
+    diameterToleranceInches REAL,
+    measurementQuality TEXT,
+    diameterProfile TEXT,
+    cloudId TEXT
+  )
+&#x27;&#x27;&#x27;);</pre></div>
+<p><b>measurementSource, rawDiameterInches, deductionInches, diameterToleranceInches, measurementQuality, diameterProfile</b> — මේ columns 6 තමයි provenance (මූලාශ්‍රය). මාස 6කට පස්සේ ගැනුම්කරුවෙක් volume එකක් ගැන තර්ක කළොත් මේවා තමයි උත්තරය.</p>
+<table><thead><tr><th>Column</th><th>තේරුම</th></tr></thead><tbody><tr><td>measurementSource</td><td>sensor එකෙන්ද, keyboard එකෙන්ද?</td></tr><tr><td>rawDiameterInches</td><td>deduction එකට කලින් තිබ්බ ඇත්ත මිනුම</td></tr><tr><td>deductionInches</td><td>bark allowance එක කීයද අඩු කළේ?</td></tr><tr><td>diameterToleranceInches</td><td>මිනුමේ අවිනිශ්චිතතාව</td></tr><tr><td>measurementQuality</td><td>scan එක කොච්චර හොඳද?</td></tr><tr><td>diameterProfile</td><td>අක්ෂය දිගේ හැම cross-section එකකම විෂ්කම්භය</td></tr></tbody></table>
+<h3>defects — දෝෂ</h3>
+<div class="codeblock"><div class="cap">_v6Tables</div><pre class="dart">CREATE TABLE defects(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  logId INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 1,
+  automatic INTEGER NOT NULL DEFAULT 0,
+  centreX REAL,
+  centreY REAL,
+  radius REAL,
+  imagePath TEXT,
+  overlayPath TEXT,
+  createdAt TEXT NOT NULL,
+  cloudId TEXT,
+  FOREIGN KEY (logId) REFERENCES logs (id) ON DELETE CASCADE
+)
+&quot;&quot;&quot;,</pre></div>
+<div class="note"><b>confidence</b> සහ <b>automatic</b> දෙකම තියෙන්නේ ඇයි? 'මේ දෝෂය model එකෙන් හොයාගත්තද, මිනිහෙක් mark කළද' සහ 'කොච්චර විශ්වාසද' කියන දෙක. Cutting engine එක 0.60ට වඩා confidence තියෙන දෝෂ විතරයි no-go zone විදිහට ගන්නේ.</div>
+<h3>cutting_patterns — කැපුම් සැලැස්ම</h3>
+<div class="codeblock"><div class="cap">_v6Tables</div><pre class="dart">CREATE TABLE cutting_patterns(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  logId INTEGER NOT NULL UNIQUE,
+  strategy TEXT NOT NULL,
+  boardWidthMm REAL,
+  boardThicknessMm REAL NOT NULL,
+  bladeThicknessMm REAL NOT NULL,
+  boardCount INTEGER NOT NULL,
+  yieldPercent REAL NOT NULL,
+  boardVolumeCubicFeet REAL NOT NULL,
+  wasteVolumeCubicFeet REAL NOT NULL,
+  sawPasses INTEGER NOT NULL,
+  pricePerCubicFoot REAL NOT NULL DEFAULT 0,
+  createdAt TEXT NOT NULL,
+  cloudId TEXT,
+  FOREIGN KEY (logId) REFERENCES logs (id) ON DELETE CASCADE
+)
+&quot;&quot;&quot;,</pre></div>
+<div class="warn"><b>logId INTEGER NOT NULL UNIQUE</b> — මේක තමයි වැදගත්ම කොටස. එක ලෝග් එකකට එක pattern එකයි. නැවත ගණනය කළොත් පරණ එක replace වෙනවා. මේක <b>schema එකෙන්</b> enforce වෙනවා, code එකේ 'පරණ එක delete කරන්න මතක තියාගන්න' කියන එකෙන් නොවේ.</div>
+<h3>sync_outbox — cloud එකට යන්න බලා ඉන්න වැඩ</h3>
+<div class="codeblock"><div class="cap">_createOutboxTable</div><pre class="dart">  CREATE TABLE sync_outbox(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    localId INTEGER,
+    parentLocalId INTEGER,
+    cloudId TEXT,
+    parentCloudId TEXT,
+    queuedAt TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lastError TEXT
+  )
+&quot;&quot;&quot;;</pre></div>
+<table><thead><tr><th>Column</th><th>තේරුම</th></tr></thead><tbody><tr><td>entity</td><td>stack / log / standaloneLog / settings</td></tr><tr><td>operation</td><td>upsert හෝ delete</td></tr><tr><td>localId</td><td>SQLite row id එක (upsert වලට)</td></tr><tr><td>cloudId</td><td>Firestore document id (delete වලට — row එක නැති නිසා)</td></tr><tr><td>attempts</td><td>කී වතාවක් try කළාද</td></tr><tr><td>lastError</td><td>අන්තිමට වුණු වැරැද්ද — developer screen එකේ පේනවා</td></tr></tbody></table>
+<h2>2.4 Migrations — පරණ phone එකක data නැති නොවී</h2>
+<p>Database එක වෙනස් වුණාම, දැනටමත් phone එකේ තියෙන data නැති නොවී අලුත් columns එකතු වෙන්න ඕන. ඒක තමයි migration එකක්:</p>
+<div class="codeblock"><div class="cap">onUpgrade</div><pre class="dart">onUpgrade: (db, oldVersion, newVersion) async {
+  if (oldVersion &lt; 2) {
+    await db.execute(
+      &quot;ALTER TABLE stacks ADD COLUMN totalCost REAL DEFAULT 0&quot;,
+    );
+    await db.execute(
+      &quot;ALTER TABLE stacks ADD COLUMN createdAt TEXT&quot;,
+    );
+    await db.execute(
+      &quot;ALTER TABLE logs ADD COLUMN cost REAL DEFAULT 0&quot;,
+    );
+    await db.execute(
+      &quot;ALTER TABLE logs ADD COLUMN createdAt TEXT&quot;,
+    );
+  }</pre></div>
+<p><code>if (oldVersion &lt; N)</code> කියන pattern එකෙන් — v2 එකේ ඉන්න phone එකක් v7ට යද්දී, v3, v4, v5, v6, v7 හැම එකක්ම පිළිවෙළින් run වෙනවා.</p>
+<h3>v5 — cloudId ඇයි?</h3>
+<div class="codeblock"><div class="cap">අනුවාද 5</div><pre class="dart">if (oldVersion &lt; 5) {
+  // The identity a row has in the cloud, stored next to the row.
+  //
+  // Without it, restoring onto a new phone gives every row a fresh
+  // local id, and the next upload invents a *second* cloud document
+  // for data already up there -- the backup would duplicate itself a
+  // little more with every reinstall.
+  await db.execute(&quot;ALTER TABLE stacks ADD COLUMN cloudId TEXT&quot;);
+  await db.execute(&quot;ALTER TABLE logs ADD COLUMN cloudId TEXT&quot;);
+
+  await db.execute(_createOutboxTable);
+}</pre></div>
+<h3>v7 — SDS schema එකට align කිරීම</h3>
+<div class="codeblock"><div class="cap">_v7Columns</div><pre class="dart">static const List&lt;String&gt; _v7Columns = [
+  // SDS: Log(..., notes). EC04 FR12 is explicit that the user &quot;enters
+  // optional notes&quot; before saving, and there was nowhere to put them --
+  // only a stack could carry a remark, not the individual log it was
+  // about.
+  &quot;ALTER TABLE logs ADD COLUMN notes TEXT&quot;,
+
+  // SDS: Log(..., diameter_1, diameter_2). Both ends of the log, which is
+  // what a taper-aware formula needs. The scan already derives a full
+  // sectional profile; these record the two ends explicitly so a reading
+  // can be checked against a tape at either end.
+  &quot;ALTER TABLE logs ADD COLUMN smallEndDiameter REAL&quot;,
+  &quot;ALTER TABLE logs ADD COLUMN largeEndDiameter REAL&quot;,
+
+  // SDS: Stack(..., user_id FK). EC04 FR21 requires that &quot;a user can
+  // retrieve only the records owned by that user&quot; -- which nothing local
+  // enforced, so two accounts on one phone saw each other&#x27;s stacks.
+  &quot;ALTER TABLE stacks ADD COLUMN userId TEXT&quot;,
+
+  // SDS: Stack(..., rate). The agreed price per cubic foot for the batch,
+  // which is not recoverable from a total once logs are added or removed.
+  &quot;ALTER TABLE stacks ADD COLUMN rate REAL&quot;,
+
+  // SDS: Defect(..., severity ENUM(&#x27;Low&#x27;,&#x27;Medium&#x27;,&#x27;High&#x27;)). Kept as TEXT
+  // because SQLite has no ENUM; the allowed values live in the Dart enum
+  // that writes it.
+  &quot;ALTER TABLE defects ADD COLUMN severity TEXT&quot;,
+];</pre></div>
+<h2>2.5 Outbox එකේ dedup — වැදගත් trick එකක්</h2>
+<div class="codeblock"><div class="cap">enqueueUpsert</div><pre class="dart">static Future&lt;void&gt; enqueueUpsert({
+  required String entity,
+  required int localId,
+  int? parentLocalId,
+}) async {</pre></div>
+<p><b>මොකද වෙන්නේ:</b> එකම stack එකට upsert එකක් දැනටමත් queue එකේ තියෙනවා නම්, පරණ එක delete කරලා අලුත් එකක් දානවා.</p>
+<div class="note">Upsert එකේ <b>payload එකක් නෑ</b> — යවන වෙලාවේ row එක නැවත කියවනවා. ඒ නිසා stack එකකට වෙනස්කම් 20ක් කළත් upload එකක් විතරයි. සති දෙකක් offline වැඩ කළත් queue එක අසීමිතව වැඩෙන්නේ නෑ.</div>
+<h2>2.6 Search — SQL එකේම filter කරනවා</h2>
+<div class="codeblock"><div class="cap">searchStacks</div><pre class="dart">static Future&lt;List&lt;Map&lt;String, dynamic&gt;&gt;&gt; searchStacks({
+  String? keyword,
+  DateTime? from,
+  DateTime? to,
+}) async {</pre></div>
+<p><b>ඇයි Dart එකේ නොකර SQL එකේ?</b> Entries 500ක් තියෙද්දී retrieval තත්පර 2ට අඩු වෙන්න ඕන (NFR). හැම row එකක්ම memory එකට අරගෙන බොහෝ ඒවා විසි කරොත්, user එකාට history එකතු වෙන ගමන්ම හෙමින් වෙනවා.</p>
+<h1>3. Data ගලා යන මාර්ගය (Data Flow)</h1>
+<div class="codeblock"><pre class="text">Screen  ──&gt;  StackRepository  ──&gt;  LocalDB (SQLite)
+                    │
+                    └──&gt;  CloudSyncEngine  ──&gt;  sync_outbox
+                                │
+                                ▼
+                        CloudTransport  ──&gt;  Firestore</pre></div>
+<p><b>නීතිය:</b> Screens කවදාවත් LocalDB එකට කෙළින්ම කතා කරන්නේ නෑ. ඒවා යන්නේ StackRepository එක හරහා. ඒ නිසා 'save කරාම sync queue එකටත් දාන්න ඕන' කියන එක එකම තැනක තියෙනවා.</p>
+<h2>3.1 StackRepository — save කරන ආකාරය</h2>
+<div class="codeblock"><div class="cap">stack_repository.dart</div><pre class="dart">Future&lt;int&gt; addLogToStack({
+  required int stackId,
+  required double diameter,
+  required double lengthFeet,
+  required double volume,
+  double cost = 0,
+  LogMeasurement? measurement,
+  double? deductionInches,
+}) async {</pre></div>
+<p><code>unawaited(_syncStack(stackId))</code> — sync එක <b>await කරන්නේ නෑ</b>. User එකා log එක save කරාම වහාම ඊළඟ එකට යන්න පුළුවන්. Cloud එකට යන එක පස්සෙන් වෙනවා.</p>
+<h2>3.2 Delete කරද්දී පරිස්සම් වෙන්න ඕන තැනක්</h2>
+<div class="codeblock"><div class="cap">deleteStack</div><pre class="dart">Future&lt;void&gt; deleteStack(int id) async {
+  // Read the cloud identity before the row goes: afterwards there is
+  // nothing left to look it up from, and a delete that cannot name its
+  // document leaves the copy in the cloud behind for ever.
+  final stackRow = await LocalDB.getStack(id);
+  final logRows = await LocalDB.getLogsForStack(id);
+
+  await LocalDB.deleteStack(id);
+
+  // Removing the stack in the cloud takes its logs subcollection with it,
+  // so the logs need no delete entries of their own. What they must not
+  // keep is a queued *upsert*: draining that after the stack is gone would
+  // recreate the subcollection and leave orphaned logs behind for ever.
+  for (final log in logRows) {
+    await LocalDB.dropQueuedUpsert(SyncEntity.log, log[&quot;id&quot;] as int);
+  }</pre></div>
+<div class="warn"><b>මෙතන bug එකක් තිබුණා.</b> Stack එකක් delete කරාම, ඒක ඇතුළේ තිබ්බ logs වලට queue එකේ තිබ්බ <b>upsert</b> ඒවා ඉතුරු වුණා. ඒවා පස්සේ drain වුණාම, delete කරපු stack එකේ subcollection එක නැවත හැදෙනවා — orphan logs cloud එකේ සදහටම. <code>dropQueuedUpsert</code> එකෙන් ඒක නවතිනවා.</div>
+<h1>4. Cloud Sync — ගැඹුරින්</h1>
+<h2>4.1 Queue එකට දාන එක</h2>
+<div class="codeblock"><div class="cap">cloud_sync_engine.dart</div><pre class="dart">Future&lt;void&gt; queueLog(int logId, {int? stackId}) async {
+  await LocalDB.enqueueUpsert(
+    entity: stackId == null ? SyncEntity.standaloneLog : SyncEntity.log,
+    localId: logId,
+    parentLocalId: stackId,
+  );
+  unawaited(drain());
+}</pre></div>
+<h2>4.2 Drain — queue එක හිස් කිරීම</h2>
+<div class="codeblock"><div class="cap">drain()</div><pre class="dart">Future&lt;void&gt; drain() {
+  final running = _inFlight;
+
+  if (running != null) {
+    // Work arrived mid-flight: go round again rather than making it wait
+    // for the next trigger, and hand this caller the same finish line.
+    _drainAgain = true;
+    return running;
+  }</pre></div>
+<div class="warn"><b>මෙතන තිබුණු bug එක:</b> කලින් drain() එකක් දුවනවා නම්, දෙවෙනි call එක වහාම return කළා. ඒ කියන්නේ <code>await drain()</code> කියන එක <b>බොරුවක්</b> — upload එක තාම යනකොට 'ඉවරයි' කිව්වා. දැන් in-flight future එකම return කරනවා.</div>
+<h2>4.3 Fail වුණාම මොකද වෙන්නේ</h2>
+<div class="codeblock"><div class="cap">_drainOnce()</div><pre class="dart">  for (final item in items) {
+    try {
+      await _send(uid, item);
+      await LocalDB.removeSyncItem(item[&quot;id&quot;] as int);
+    } catch (error) {
+      await LocalDB.recordSyncAttempt(item[&quot;id&quot;] as int, &quot;$error&quot;);
+      CloudSyncStatus.instance.recordFailure(
+        error,
+        operation: &quot;backing up a ${item[&quot;entity&quot;]}&quot;,
+      );
+
+      // Leave the rest queued and come back to it.
+      _scheduleRetry();
+      await _refreshPending();
+      return;
+    }
+  }
+
+  CloudSyncStatus.instance.recordSuccess();
+  _retryTimer?.cancel();
+  await _refreshPending();
+}</pre></div>
+<p><b>පළමු fail එකේදීම නවතිනවා</b> — ඉස්සරහට යන්නේ නෑ. ඇයි? Queue එක පිළිවෙළට තියෙන්නේ. Stack එකක් cloud එකේ නැතුව ඒක ඇතුළේ log එකක් ලියන්න බෑ. Fail එකක් පනිනවා නම් cloud එකේ orphans විසිරෙනවා.</p>
+<h2>4.4 cloudId — duplicate නොවීමේ රහස</h2>
+<div class="codeblock"><div class="cap">_cloudIdFor()</div><pre class="dart">Future&lt;String&gt; _cloudIdFor(
+  String table,
+  int localId,
+  Object? existing,
+) async {
+  final current = existing as String?;
+  if (current != null &amp;&amp; current.isNotEmpty) return current;
+
+  final deviceId = await LocalStorageService.getOrCreateDeviceId();
+  final minted = &quot;${deviceId}_$localId&quot;;
+
+  await LocalDB.setCloudId(table, localId, minted);
+
+  return minted;
+}</pre></div>
+<p>Device id එකත් එකතු කරන්නේ ඇයි? Phone දෙකක් offline log එකක් add කළොත් දෙකටම local id 7 ලැබෙන්න පුළුවන්. Device id එකෙන් cloud document id දෙක වෙනස් වෙනවා.</p>
+<h2>4.5 Transport — ඇයි interface එකක්?</h2>
+<div class="codeblock"><div class="cap">cloud_transport.dart</div><pre class="dart">abstract class CloudTransport {
+  Future&lt;void&gt; upsertStack(
+    String uid,
+    String cloudId,
+    Map&lt;String, Object?&gt; data,
+  );
+
+  Future&lt;void&gt; upsertLog(
+    String uid,
+    String stackCloudId,
+    String cloudId,
+    Map&lt;String, Object?&gt; data,</pre></div>
+<p>Engine එකේ වැඩේ — පිළිවෙළ, retry, කිසිවක් නැති නොවීම — ඒක තමයි නිවැරදිව තියෙන්න ඕන කොටස. නමුත් ඒක real Firestore එකකට එරෙහිව device එකක් නැති machine එකක test කරන්න බෑ. Interface එකක් නිසා test වලදී <b>fake cloud</b> එකක් දාන්න පුළුවන්:</p>
+<div class="codeblock"><div class="cap">test/cloud_sync_test.dart</div><pre class="dart">class FakeCloud implements CloudTransport {
+  final Map&lt;String, Map&lt;String, Object?&gt;&gt; stacks = {};
+  final Map&lt;String, Map&lt;String, Map&lt;String, Object?&gt;&gt;&gt; logs = {};
+  final Map&lt;String, Map&lt;String, Object?&gt;&gt; standalone = {};
+  Map&lt;String, Object?&gt; settings = {};
+
+  /// When set, every call throws it. Stands in for no signal, or for rules
+  /// that reject the write.
+  Object? failure;
+
+  int writes = 0;
+
+  void _check() {
+    if (failure != null) throw failure!;</pre></div>
+<h2>4.6 Restore — අලුත් phone එකකට</h2>
+<div class="codeblock"><div class="cap">cloud_restore_service.dart</div><pre class="dart">Future&lt;RestoreOutcome&gt; restore() async {
+  final uid = _uidReader();
+  if (uid == null) return const RestoreOutcome();
+
+  final snapshot = await _transport.downloadAll(uid);
+
+  var restoredLogs = 0;
+
+  for (final stack in snapshot.stacks) {
+    final cloudId = stack[&quot;cloudId&quot;] as String?;
+
+    final localStackId = await LocalDB.insertRestoredStack(stack);
+
+    // Logs are written under the *new* local id their parent just got,
+    // while keeping the cloud id they arrived with. Getting this wrong is
+    // how a restore silently reparents someone&#x27;s timber into the wrong
+    // customer&#x27;s stack.
+    for (final log in snapshot.logsByStack[cloudId] ?? const []) {
+      await LocalDB.insertRestoredLog(log, stackId: localStackId);
+      restoredLogs++;
+    }
+  }
+
+  for (final log in snapshot.standaloneLogs) {</pre></div>
+<div class="warn"><b>Logs අලුත් local stack id එකට යන්න ඕන.</b> මේක වැරදුනොත් කෙනෙකුගේ දැව වැරදි ගැනුම්කරුවෙකුගේ stack එකට යනවා.</div>
+<h1>5. ඇල්ගොරිතම — ඇත්ත කේතය සමඟ</h1>
+<h2>5.1 Ellipse Fitting</h2>
+<p>ලෝග් මුහුණත ඇලයෙන් ඡායාරූප ගත්තොත් ඒක ellipse එකක්. Rays 72ක් යවනවා, නමුත් සමහරක් shadow එකකට වදිනවා. Ellipse එකක් fit කිරීමෙන් ඒ වැරදි ඒවා <b>outvote</b> වෙනවා.</p>
+<div class="codeblock"><div class="cap">Ellipse.radiusAt()</div><pre class="dart">double radiusAt(double angle) {
+  final local = angle - rotation;
+  final c = semiMinor * math.cos(local);
+  final s = semiMajor * math.sin(local);
+
+  final denominator = math.sqrt(c * c + s * s);
+  if (denominator &lt;= 0) return 0;
+
+  return semiMajor * semiMinor / denominator;
+}</pre></div>
+<div class="codeblock"><div class="cap">වැදගත්ම තේරුම් ගැනීම</div><pre class="dart">/// When a round face is photographed at an angle, the minor axis is
+/// foreshortened but the major axis still spans the true diameter. So this
+/// -- not the mean of the two -- is the figure to scale from.
+double get trueDiameter =&gt; semiMajor * 2;</pre></div>
+<h2>5.2 Log Face Mask — O(1) fit check</h2>
+<div class="codeblock"><div class="cap">log_face_mask.dart</div><pre class="dart">bool containsRect(Rect rect) {
+  if (rect.width &lt;= 0 || rect.height &lt;= 0) return false;
+  if (!rect.left.isFinite || !rect.top.isFinite) return false;
+  if (!rect.right.isFinite || !rect.bottom.isFinite) return false;
+
+  final c0 = ((rect.left - origin.dx) / cellSize).floor();
+  final r0 = ((rect.top - origin.dy) / cellSize).floor();
+  final c1 = ((rect.right - origin.dx) / cellSize).floor();
+  final r1 = ((rect.bottom - origin.dy) / cellSize).floor();
+
+  if (c0 &lt; 0 || r0 &lt; 0 || c1 &gt;= cols || r1 &gt;= rows) return false;
+  if (c1 &lt; c0 || r1 &lt; r0) return false;
+
+  final cellCount = (c1 - c0 + 1) * (r1 - r0 + 1);
+
+  return _sum(c0, r0, c1, r1) == cellCount;</pre></div>
+<p>Summed-area table එකක් නිසා ඕනෑම හතරැසක් <b>එකම ගණනයකින්</b> check කරන්න පුළුවන් — හතරැසේ ලොකු කම කුමක් වුණත්.</p>
+<h2>5.3 Sawing Engine — search එක</h2>
+<div class="codeblock"><div class="cap">planCant()</div><pre class="dart">static SawPlan? planCant(SawingRequest request) {
+  if (!request.isValid) return null;
+
+  SawPlan? best;
+
+  for (var i = 0; i &lt; _angleSteps; i++) {
+    final angle = math.pi * i / _angleSteps;
+
+    final context = _RotatedFace.build(request, angle);
+    if (context == null) continue;
+
+    for (final swapped in _orientations(request)) {
+      final plan = _packCant(request, context, swapped);
+      if (plan == null) continue;
+
+      if (best == null ||
+          plan.boardVolumeCubicFeet &gt; best.boardVolumeCubicFeet) {
+        best = plan;
+      }
+    }
+  }
+
+  return best;</pre></div>
+<p>Angles 12 × orientations 2 = candidates 24ක්. හැම එකකම volume එක ගණනය කරලා හොඳම එක තෝරනවා.</p>
+<div class="codeblock"><div class="cap">ඇයි අර්ධ භ්‍රමණයක්?</div><pre class="dart">/// Pattern rotations tried, spread over a half turn.
+///
+/// A half turn rather than a quarter because a log face is not
+/// symmetric -- the flat side left by a previous cut, or the dent where a
+/// branch came off, makes 10 degrees and 100 degrees genuinely different.
+static const int _angleSteps = 12;</pre></div>
+<h2>5.4 Volume — ශ්‍රී ලංකා ක්‍රමය</h2>
+<div class="codeblock"><div class="cap">timber_volume.dart</div><pre class="dart">/// A running total over a stack, added the way the trade adds it.
+///
+/// Each log&#x27;s adi and angal are counted in their own column and the carry is
+/// only taken at the very end: every angal is summed, then divided by 12,
+/// and the whole part is carried into the adi column.
+///
+/// This is deliberately integer arithmetic. Summing each log&#x27;s decimal cubic
+/// feet instead would accumulate binary rounding error across a long stack
+/// and could land the printed total a hair either side of a boundary, which
+/// on an invoice reads as the app being unable to add up.
+@immutable
+class StackVolumeTotal {</pre></div>
+<div class="warn">Decimal cubic feet එකතු කරොත් binary rounding error එකතු වෙනවා. Invoice එකක මුළු එකතුව හරියන්නේ නැත්නම්, user එකාට පේන්නේ app එකට එකතු කරන්න බැරි බවයි.</div>
+<h2>5.5 Password Policy</h2>
+<div class="codeblock"><div class="cap">password_policy.dart</div><pre class="dart">static String? validate(String? password) {
+  final value = password ?? &quot;&quot;;
+
+  if (value.isEmpty) return &quot;Enter a password&quot;;
+
+  if (value.length &lt; minLength) {
+    return &quot;Use at least $minLength characters&quot;;
+  }
+
+  if (!value.contains(RegExp(r&#x27;[A-Z]&#x27;))) {
+    return &quot;Add a capital letter&quot;;
+  }
+
+  if (!value.contains(RegExp(r&#x27;[a-z]&#x27;))) {
+    return &quot;Add a small letter&quot;;
+  }
+
+  if (!value.contains(RegExp(r&#x27;[0-9]&#x27;))) {
+    return &quot;Add a number&quot;;
+  }
+
+  // Anything that is not a letter, a digit or a space. Defining it by
+  // exclusion rather than listing symbols means a password using a
+  // character nobody thought to allow is not rejected for no reason.
+  if (!value.contains(RegExp(r&#x27;[^A-Za-z0-9\s]&#x27;))) {
+    return &quot;Add a symbol, like ! or @&quot;;
+  }
+
+  return null;</pre></div>
+<p>Firebase එකෙන් enforce කරන්නේ අකුරු 6ක් විතරයි — වෙන කිසිම නීතියක් නෑ. ඒ නිසා අනෙක් හැම නීතියක්ම මේ validator එකේ තියෙන්න ඕන.</p>
+<h1>6. Screen Flows — කේතය සමඟ</h1>
+<h2>6.1 Log Face Trace — handles 6</h2>
+<p>පරණ code එකේ ප්‍රශ්නය: pan එකක් වෙන හැම වතාවේම points 72න් <b>ළඟම එක</b> හොයාගෙන ඒක අදිනවා. ඇඟිල්ල ලෝග් එක හරහා ගියොත් එක point එකක් අතාරලා තව එකක් අල්ලනවා — පිටිපස්සේ දිගට කුඩු පාරවල්.</p>
+<div class="codeblock"><div class="cap">log_face_trace_screen.dart</div><pre class="dart">_Handle? _handleAt(Offset screenPoint, FittedImageMapper mapper) {
+  _Handle? best;
+  var bestDistance = _grabRadius;
+
+  _handlePositions(mapper).forEach((handle, imagePoint) {
+    final distance = (mapper.toScreen(imagePoint) - screenPoint).distance;
+
+    if (distance &lt;= bestDistance) {
+      bestDistance = distance;
+      best = handle;
+    }</pre></div>
+<p>දැන්: <b>grab radius එකක්</b> තියෙනවා. ඇඟිල්ල handle එකකට ළඟ නැත්නම් <code>null</code> — ඒ කියන්නේ <b>කිසිම දෙයක් වෙන්නේ නෑ</b>.</p>
+<div class="codeblock"><div class="cap">_moveHandle()</div><pre class="dart">void _moveHandle(_Handle handle, Offset imagePoint) {
+  final shape = _shape!;
+
+  if (handle == _Handle.centre) {
+    setState(() =&gt; _shape = shape.copyWith(centre: imagePoint));
+    return;
+  }
+
+  final delta = imagePoint - shape.centre;
+
+  final along = Offset(math.cos(shape.rotation), math.sin(shape.rotation));
+  final across = Offset(-along.dy, along.dx);
+
+  // A resize handle only ever changes the axis it belongs to; the reach
+  // across the other axis is ignored. That is what makes a sloppy drag
+  // still do the one comprehensible thing.
+  switch (handle) {
+    case _Handle.majorPlus:
+    case _Handle.majorMinus:
+      final reach = (delta.dx * along.dx + delta.dy * along.dy).abs();
+      setState(() {
+        _shape = shape.copyWith(semiMajor: math.max(reach, 6));
+      });</pre></div>
+<h3>Gesture handling — bug එකක් තිබුණු තැන</h3>
+<div class="codeblock"><div class="cap">ඇයි tap callbacks නෑ?</div><pre class="dart">// Pan callbacks only, deliberately. `onPanDown` already fires on
+// every pointer down, tap or not, so adding tap callbacks alongside
+// them does two kinds of damage: a plain tap runs `onDown` twice --
+// marking a defect and immediately unmarking it -- and the moment a
+// drag passes the tap slop the tap recogniser cancels, which used to
+// let go of the handle the drag had just taken hold of.
+return GestureDetector(
+  // Keyed so a test can find the drawing surface and work out where
+  // the handles are on screen.
+  key: const ValueKey(&quot;trace-canvas&quot;),
+  onPanDown: (d) =&gt; onDown(d.localPosition),
+  onPanUpdate: (d) =&gt; onMove(d.localPosition),
+  onPanEnd: (_) =&gt; onUp(),
+  onPanCancel: onUp,</pre></div>
+<h2>6.2 Cutting — isolate එකක ගණනය කිරීම</h2>
+<div class="codeblock"><div class="cap">optimal_cutting_screen.dart</div><pre class="dart">setState(() =&gt; _planning = true);
+
+// Off the UI thread: the search is long enough to freeze the screen, and
+// a frozen screen is indistinguishable from a crashed one.
+final comparison = await compute(SawingEngine.planBoth, request);
+
+if (!mounted) return;
+setState(() =&gt; _planning = false);
+
+Navigator.push(</pre></div>
+<p>Search එකට desktop එකක තත්පර 0.5ක් යනවා. Phone එකක ඊට වඩා. UI thread එකේ කළොත් screen එක <b>හිර වෙනවා</b> — සහ හිර වුණු screen එකක් crash වුණු එකක් වගේම පේනවා.</p>
+<h2>6.3 Pattern එක ඡායාරූපය උඩ අඳින එක</h2>
+<div class="codeblock"><div class="cap">sawing_pattern_painter.dart</div><pre class="dart">/// A point in plan millimetres, in widget coordinates.
+Offset toScreen(Offset mm) =&gt; mapper.toScreen(
+      Offset(
+        faceOriginPx.dx + mm.dx / mmPerPixel,
+        faceOriginPx.dy + mm.dy / mmPerPixel,
+      ),
+    );</pre></div>
+<p>mm → image pixel → screen coordinate. <code>faceOriginPx</code> එකෙන් plan එක ඡායාරූපයේ නිවැරදි තැනට යනවා.</p>
+<h1>7. Diagnostics — ඇයි සහ කොහොමද</h1>
+<div class="codeblock"><div class="cap">diagnostics_service.dart</div><pre class="dart">Future&lt;T&gt; timed&lt;T&gt;(String module, Future&lt;T&gt; Function() action) async {
+  final watch = Stopwatch()..start();
+
+  try {
+    final result = await action();
+    watch.stop();
+
+    await recordTiming(
+        module: module, milliseconds: watch.elapsedMilliseconds);
+
+    return result;
+  } catch (error) {</pre></div>
+<p>හැම call site එකකටම stopwatch එකක් මතක තියාගන්න කියනවා වෙනුවට wrap කරනවා. <b>මතක නැති වුණු timing එක තමයි හැම විටම වැදගත් වෙන එක.</b></p>
+<div class="codeblock"><div class="cap">p90 — mean නොවේ</div><pre class="dart">Future&lt;int?&gt; percentile90(String module) async {
+  try {
+    final rows =
+        await LocalDB.getDiagnostics(limit: LocalDB.diagnosticsLimit);
+
+    final durations = &lt;int&gt;[
+      for (final row in rows)
+        if (row[&quot;kind&quot;] == kindTiming &amp;&amp;</pre></div>
+<div class="note">Requirement එකේ කියන්නේ 90th percentile එකෙන්. Mean එකෙන් හෙමින් runs හංගනවා — ඒවා තමයි target එක තියෙන්නේම අල්ලගන්න.</div>
+<h2>7.1 Diagnostic store එක වැඩෙන්නේ නෑ</h2>
+<div class="codeblock"><div class="cap">recordDiagnostic() — trim on write</div><pre class="dart">await db.rawDelete(
+  &quot;DELETE FROM diagnostics WHERE id NOT IN &quot;
+  &quot;(SELECT id FROM diagnostics ORDER BY id DESC LIMIT ?)&quot;,
+  [diagnosticsLimit],
+);</pre></div>
+<p>Rows 200යි. ලියන වෙලාවේම trim කරනවා — කියවන වෙලාවේ නොවේ. ඒ නිසා කවුරුවත් නොබලන phone එකක ගොනුව මාස ගණන් නිශ්ශබ්දව වැඩෙන්නේ නෑ.</p>
+<h1>8. Tests — කේතය නිවැරදි කියලා දන්නේ කොහොමද</h1>
+<p>Tests 327ක්. Test නම් වලින්ම architecture එක කියවෙනවා:</p>
+<div class="codeblock"><div class="cap">test/cloud_sync_test.dart</div><pre class="dart">test(&#x27;work survives the cloud being unreachable, and goes later&#x27;, () async {
+  final id = await LocalDB.createStack(&quot;Mahogany&quot;, 0);
+
+  cloud.failure = Exception(&quot;no signal&quot;);
+
+  await engine.queueStack(id);
+  await engine.drain();
+
+  // The old design pushed with unawaited() and no record: this stack
+  // would simply never have existed in the cloud, and nobody would know.
+  expect(cloud.stacks, isEmpty);
+  expect(await LocalDB.pendingSyncCount(), 1);
+
+  cloud.failure = null;
+  await engine.drain();
+
+  expect(cloud.stacks, hasLength(1));
+  expect(await LocalDB.pendingSyncCount(), 0);
+});</pre></div>
+<p>මේ test එකෙන් ඔප්පු කරන්නේ: cloud එක නැති වුණාම <b>කිසිවක් නැති වෙන්නේ නෑ</b>, සහ පස්සේ ඒක ඉබේම යනවා.</p>
+<div class="codeblock"><div class="cap">test/nfr_test.dart — NFR එකක් ඔප්පු කිරීම</div><pre class="dart">test(&#x27;the saved-records query stays fast with a full database&#x27;, () async {
+  // The requirement names 500 entries, so that is what is measured --
+  // not 10, which any implementation passes.
+  const entries = 500;
+
+  for (var i = 0; i &lt; entries; i++) {
+    final stackId = await LocalDB.createStack(
+      &quot;Stack $i&quot;,
+      0,
+      customerName: &quot;Customer ${i % 40}&quot;,
+    );
+
+    await LocalDB.addLogAndUpdateStackVolume(
+      stackId: stackId,
+      diameter: 20 + (i % 15),
+      lengthFeet: 10,
+      volume: 5,
+    );
+  }
+
+  final watch = Stopwatch()..start();
+  final stacks = await LocalDB.getStacks();
+  watch.stop();
+
+  expect(stacks, hasLength(entries));
+  expect(</pre></div>
+<p>NFR එකක් ලේඛනයේ ලියනවා වෙනුවට <b>මනිනවා</b>. Entries 500ක් හදලා, retrieval එක තත්පර 2ට අඩුද කියලා බලනවා.</p>
+<h1>9. Database — සම්පූර්ණ Schema සාරාංශය</h1>
+<table><thead><tr><th>Table</th><th>PK</th><th>FK</th><th>Columns</th></tr></thead><tbody><tr><td>users</td><td>uid</td><td>—</td><td>uid, name, email, phone, company, createdAt</td></tr><tr><td>stacks</td><td>id</td><td>userId → users</td><td>id, name, totalVolume, totalCost, createdAt, customerName, remarks, cloudId, userId, rate</td></tr><tr><td>logs</td><td>id</td><td>stackId → stacks</td><td>id, stackId, diameter, lengthFeet, volume, cost, createdAt, measurementSource, rawDiameterInches, deductionInches, diameterToleranceInches, measurementQuality, diameterProfile, cloudId, notes, smallEndDiameter, largeEndDiameter</td></tr><tr><td>defects</td><td>id</td><td>logId → logs</td><td>id, logId, kind, confidence, automatic, centreX, centreY, radius, imagePath, overlayPath, createdAt, cloudId, severity</td></tr><tr><td>cutting_patterns</td><td>id</td><td>logId → logs (UNIQUE)</td><td>id, logId, strategy, boardWidthMm, boardThicknessMm, bladeThicknessMm, boardCount, yieldPercent, boardVolumeCubicFeet, wasteVolumeCubicFeet, sawPasses, pricePerCubicFoot, createdAt, cloudId</td></tr><tr><td>reports</td><td>id</td><td>stackId / logId</td><td>id, stackId, logId, format, filePath, totalVolumeCubicFeet, totalCost, createdAt</td></tr><tr><td>diagnostics</td><td>id</td><td>—</td><td>id, kind, module, code, message, durationMs, createdAt</td></tr><tr><td>sync_outbox</td><td>id</td><td>—</td><td>id, entity, operation, localId, parentLocalId, cloudId, parentCloudId, queuedAt, attempts, lastError</td></tr></tbody></table>
+<h2>9.1 සම්බන්ධතා (Relationships)</h2>
+<div class="codeblock"><pre class="text">users (1) ──── (many) stacks
+                        │
+                        │ (1)
+                        │
+                        ▼ (many)
+                      logs
+                        │
+        ┌───────────────┴───────────────┐
+        │ (1)                           │ (1)
+        ▼ (many)                        ▼ (0 හෝ 1)
+     defects                    cutting_patterns
+
+stacks / logs  ────&gt;  reports   (export කරපු ගොනු)
+
+sync_outbox    (කිසිවකට සම්බන්ධ නෑ — upload queue එක)
+diagnostics    (කිසිවකට සම්බන්ධ නෑ — errors + timings)</pre></div>
+<h1>10. සාරාංශය — වැදගත්ම කරුණු 8</h1>
+<table><thead><tr><th>#</th><th>කරුණ</th><th>ඇයි වැදගත්?</th></tr></thead><tbody><tr><td>1</td><td>Phone එක source of truth, cloud එක mirror</td><td>දැව ගබඩාවක signal නෑ</td></tr><tr><td>2</td><td>sync_outbox — offline queue</td><td>Fail වුණු upload එකක් නැති වෙන්නේ නෑ</td></tr><tr><td>3</td><td>cloudId හැම row එකකම</td><td>Restore කරාම duplicate වෙන්නේ නෑ</td></tr><tr><td>4</td><td>Provenance columns 6</td><td>Volume එකක් defend කරන්න පුළුවන්</td></tr><tr><td>5</td><td>cutting_patterns.logId UNIQUE</td><td>Schema එකෙන් enforce, code එකෙන් නොවේ</td></tr><tr><td>6</td><td>CloudTransport interface</td><td>Device නැතුව test කරන්න පුළුවන්</td></tr><tr><td>7</td><td>Volume එකෙන් score කරනවා</td><td>Board ගණන් කරොත් පටු board වලට ත්‍යාග</td></tr><tr><td>8</td><td>Tests 327</td><td>'වැඩ කරනවා' කියනවා වෙනුවට ඔප්පු කරනවා</td></tr></tbody></table>
+</body></html>
