@@ -233,9 +233,8 @@ class _LogScanScreenState extends State<LogScanScreen> {
     setState(() => _busy = true);
 
     final price = double.tryParse(_priceController.text.trim());
-    final cost = (price != null && price > 0)
-        ? volume.cubicFeetDecimal * price
-        : 0.0;
+    final cost =
+        (price != null && price > 0) ? volume.cubicFeetDecimal * price : 0.0;
 
     final prefs = _prefsService.current;
 
@@ -297,7 +296,9 @@ class _LogScanScreenState extends State<LogScanScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          _standaloneMode ? "Log saved." : "Added to ${_activeStackName ?? 'stack'}.",
+          _standaloneMode
+              ? "Log saved."
+              : "Added to ${_activeStackName ?? 'stack'}.",
         ),
       ),
     );
@@ -435,24 +436,19 @@ class _LogScanScreenState extends State<LogScanScreen> {
                 _qualityBadge(measurement.quality),
               ],
             ),
-
             const SizedBox(height: 12),
-
             _statRow("Girth (thinnest)", measurement.girthDisplay),
             _statRow(
               "Length",
               "${measurement.lengthFeet.toStringAsFixed(2)} ft",
             ),
-
             if (deduction > 0)
               _statRow(
                 "After deduction",
                 "${effectiveGirthInches(measuredInches: measurement.minGirthInches, deductionInches: deduction).toStringAsFixed(1)} in "
                     "(−${deduction.toStringAsFixed(1)} in)",
               ),
-
             const Divider(height: 20),
-
             Row(
               children: [
                 const Text(
@@ -471,7 +467,6 @@ class _LogScanScreenState extends State<LogScanScreen> {
                 ),
               ],
             ),
-
             if (measurement.limitingFactorMessage != null) ...[
               const SizedBox(height: 12),
               Container(
@@ -486,9 +481,7 @@ class _LogScanScreenState extends State<LogScanScreen> {
                 ),
               ),
             ],
-
             const SizedBox(height: 16),
-
             SizedBox(
               height: 50,
               width: double.infinity,
@@ -500,7 +493,6 @@ class _LogScanScreenState extends State<LogScanScreen> {
                 ),
               ),
             ),
-
             TextButton(
               onPressed: _busy ? null : _measure,
               child: const Text("Measure Again"),
@@ -592,9 +584,7 @@ class _LogScanScreenState extends State<LogScanScreen> {
               padding: const EdgeInsets.all(16),
               children: [
                 _guidanceCard(),
-
                 if (_measurement != null && _volume != null) _resultCard(),
-
                 if (_measurement == null) ...[
                   SizedBox(
                     height: 55,
@@ -616,9 +606,7 @@ class _LogScanScreenState extends State<LogScanScreen> {
                     ),
                   ],
                 ],
-
                 const SizedBox(height: 16),
-
                 TextField(
                   controller: _priceController,
                   keyboardType: const TextInputType.numberWithOptions(

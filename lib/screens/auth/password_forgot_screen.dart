@@ -6,13 +6,10 @@ class PasswordForgotScreen extends StatefulWidget {
   const PasswordForgotScreen({super.key});
 
   @override
-  State<PasswordForgotScreen> createState() =>
-      _PasswordForgotScreenState();
+  State<PasswordForgotScreen> createState() => _PasswordForgotScreenState();
 }
 
-class _PasswordForgotScreenState
-    extends State<PasswordForgotScreen> {
-
+class _PasswordForgotScreenState extends State<PasswordForgotScreen> {
   final _formKey = GlobalKey<FormState>();
 
   final _emailController = TextEditingController();
@@ -35,7 +32,6 @@ class _PasswordForgotScreenState
     });
 
     try {
-
       await AuthService.instance.resetPassword(
         _emailController.text.trim(),
       );
@@ -52,9 +48,7 @@ class _PasswordForgotScreenState
       );
 
       Navigator.pop(context);
-
     } catch (e) {
-
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -63,7 +57,6 @@ class _PasswordForgotScreenState
           content: Text(e.toString()),
         ),
       );
-
     }
 
     if (mounted) {
@@ -75,42 +68,27 @@ class _PasswordForgotScreenState
 
   @override
   Widget build(BuildContext context) {
-
     return Scaffold(
-
       appBar: AppBar(
         title: const Text(
           "Forgot Password",
         ),
       ),
-
       body: SafeArea(
-
         child: SingleChildScrollView(
-
           padding: const EdgeInsets.all(24),
-
           child: Form(
-
             key: _formKey,
-
             child: Column(
-
-              crossAxisAlignment:
-                  CrossAxisAlignment.stretch,
-
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-
                 const SizedBox(height: 30),
-
                 const Icon(
                   Icons.lock_reset,
                   size: 90,
                   color: Colors.green,
                 ),
-
                 const SizedBox(height: 20),
-
                 const Text(
                   "Reset Password",
                   textAlign: TextAlign.center,
@@ -119,9 +97,7 @@ class _PasswordForgotScreenState
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-
                 const SizedBox(height: 10),
-
                 const Text(
                   "Enter your registered email address.",
                   textAlign: TextAlign.center,
@@ -129,36 +105,19 @@ class _PasswordForgotScreenState
                     color: Colors.grey,
                   ),
                 ),
-
                 const SizedBox(height: 40),
-
                 TextFormField(
-
                   controller: _emailController,
-
-                  keyboardType:
-                      TextInputType.emailAddress,
-
+                  keyboardType: TextInputType.emailAddress,
                   decoration: InputDecoration(
-
                     labelText: "Email",
-
-                    prefixIcon:
-                        const Icon(Icons.email),
-
+                    prefixIcon: const Icon(Icons.email),
                     border: OutlineInputBorder(
-
-                      borderRadius:
-                          BorderRadius.circular(15),
-
+                      borderRadius: BorderRadius.circular(15),
                     ),
-
                   ),
-
                   validator: (value) {
-
-                    if (value == null ||
-                        value.trim().isEmpty) {
+                    if (value == null || value.trim().isEmpty) {
                       return "Enter your email";
                     }
 
@@ -168,63 +127,33 @@ class _PasswordForgotScreenState
 
                     return null;
                   },
-
                 ),
-
                 const SizedBox(height: 30),
-
                 SizedBox(
-
                   height: 55,
-
                   child: ElevatedButton(
-
-                    onPressed:
-                        _loading
-                            ? null
-                            : resetPassword,
-
+                    onPressed: _loading ? null : resetPassword,
                     style: ElevatedButton.styleFrom(
-
                       backgroundColor: Colors.green,
-
                       foregroundColor: Colors.white,
-
                     ),
-
-                    child:
-                        _loading
-
-                            ? const CircularProgressIndicator(
-                                color: Colors.white,
-                              )
-
-                            : const Text(
-
-                                "Send Reset Link",
-
-                                style: TextStyle(
-                                  fontSize: 18,
-                                ),
-
-                              ),
-
+                    child: _loading
+                        ? const CircularProgressIndicator(
+                            color: Colors.white,
+                          )
+                        : const Text(
+                            "Send Reset Link",
+                            style: TextStyle(
+                              fontSize: 18,
+                            ),
+                          ),
                   ),
-
                 ),
-
               ],
-
             ),
-
           ),
-
         ),
-
       ),
-
     );
-
   }
-
 }

@@ -28,8 +28,7 @@ class _ScanLogScreenState extends State<ScanLogScreen> {
   }
 
   Future<void> _checkCapability() async {
-    final available =
-        await LiDARService.instance.isDepthScanningAvailable();
+    final available = await LiDARService.instance.isDepthScanningAvailable();
 
     if (!mounted) return;
 
@@ -79,17 +78,13 @@ class _ScanLogScreenState extends State<ScanLogScreen> {
                 size: 110,
                 color: Colors.green,
               ),
-
               const SizedBox(height: 25),
-
               const Text(
                 "Measure a Log",
                 style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
                 textAlign: TextAlign.center,
               ),
-
               const SizedBox(height: 15),
-
               if (_checking)
                 const Text(
                   "Checking what this device can measure with...",
@@ -107,9 +102,7 @@ class _ScanLogScreenState extends State<ScanLogScreen> {
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.grey),
                 ),
-
               const SizedBox(height: 40),
-
               SizedBox(
                 width: double.infinity,
                 height: 55,

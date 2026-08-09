@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../services/auth_service.dart';
+import '../../utils/password_policy.dart';
 import 'email_verification_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
@@ -81,8 +82,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   Navigator.pushReplacement(
                     context,
                     MaterialPageRoute(
-                      builder: (_) =>
-                          const EmailVerificationScreen(),
+                      builder: (_) => const EmailVerificationScreen(),
                     ),
                   );
                 },
@@ -124,6 +124,47 @@ class _RegisterScreenState extends State<RegisterScreen> {
     }
   }
 
+  /// Fills in as the password gets stronger.
+  ///
+  /// Shown while typing rather than only on submit: a rule the user meets
+  /// before pressing the button is a rule they never experience as an error.
+  Widget _passwordStrengthBar() {
+    final password = _passwordController.text;
+    if (password.isEmpty) return const SizedBox(height: 8);
+
+    final strength = PasswordPolicy.strength(password);
+
+    final colour = strength >= 1
+        ? Colors.green
+        : (strength >= 0.6 ? Colors.orange : Colors.red);
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: strength,
+              minHeight: 5,
+              backgroundColor: Colors.grey.shade300,
+              valueColor: AlwaysStoppedAnimation(colour),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            strength >= 1
+                ? "Strong password"
+                : "8+ characters with a capital, a small letter, "
+                    "a number and a symbol",
+            style: TextStyle(fontSize: 11, color: colour),
+          ),
+        ],
+      ),
+    );
+  }
+
   InputDecoration decoration(
     String label,
     IconData icon,
@@ -141,19 +182,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xffF5F7FA),
-
       appBar: AppBar(
         title: const Text("Create Account"),
         centerTitle: true,
       ),
-
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
-
           child: Form(
             key: _formKey,
-
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -162,9 +199,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   size: 90,
                   color: Colors.green,
                 ),
-
                 const SizedBox(height: 20),
-
                 const Text(
                   "Create Account",
                   textAlign: TextAlign.center,
@@ -173,9 +208,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-
                 const SizedBox(height: 8),
-
                 const Text(
                   "Create your SmartLog account",
                   textAlign: TextAlign.center,
@@ -183,9 +216,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     color: Colors.grey,
                   ),
                 ),
-
-                const SizedBox(height: 35),               
-                 TextFormField(
+                const SizedBox(height: 35),
+                TextFormField(
                   controller: _nameController,
                   decoration: decoration(
                     "Full Name",
@@ -198,9 +230,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     return null;
                   },
                 ),
-
                 const SizedBox(height: 18),
-
                 TextFormField(
                   controller: _emailController,
                   keyboardType: TextInputType.emailAddress,
@@ -220,9 +250,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     return null;
                   },
                 ),
-
                 const SizedBox(height: 18),
-
                 TextFormField(
                   controller: _phoneController,
                   keyboardType: TextInputType.phone,
@@ -231,9 +259,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     Icons.phone_outlined,
                   ),
                 ),
-
                 const SizedBox(height: 18),
-
                 TextFormField(
                   controller: _companyController,
                   decoration: decoration(
@@ -241,9 +267,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     Icons.business_outlined,
                   ),
                 ),
-
                 const SizedBox(height: 18),
-
                 TextFormField(
                   controller: _passwordController,
                   obscureText: _hidePassword,
@@ -253,9 +277,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   ).copyWith(
                     suffixIcon: IconButton(
                       icon: Icon(
-                        _hidePassword
-                            ? Icons.visibility
-                            : Icons.visibility_off,
+                        _hidePassword ? Icons.visibility : Icons.visibility_off,
                       ),
                       onPressed: () {
                         setState(() {
@@ -264,16 +286,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       },
                     ),
                   ),
-                  validator: (value) {
-                    if (value == null || value.length < 6) {
-                      return "Password must be at least 6 characters";
-                    }
-                    return null;
-                  },
+                  // Firebase only enforces six characters and nothing else,
+                  // so the strength rule is entirely this validator's job.
+                  validator: PasswordPolicy.validate,
+                  onChanged: (_) => setState(() {}),
                 ),
-
+                _passwordStrengthBar(),
                 const SizedBox(height: 18),
-
                 TextFormField(
                   controller: _confirmPasswordController,
                   obscureText: _hideConfirmPassword,
@@ -289,8 +308,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       ),
                       onPressed: () {
                         setState(() {
-                          _hideConfirmPassword =
-                              !_hideConfirmPassword;
+                          _hideConfirmPassword = !_hideConfirmPassword;
                         });
                       },
                     ),
@@ -302,9 +320,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     return null;
                   },
                 ),
-
                 const SizedBox(height: 35),
-
                 SizedBox(
                   height: 55,
                   child: ElevatedButton(
@@ -326,9 +342,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           ),
                   ),
                 ),
-
                 const SizedBox(height: 20),
-
                 TextButton(
                   onPressed: () {
                     Navigator.pop(context);

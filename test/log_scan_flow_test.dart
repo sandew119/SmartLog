@@ -159,8 +159,7 @@ void main() {
 
         final stacks = await LocalDB.getStacks();
         expect(stacks.length, 1);
-        expect((stacks.first["totalVolume"] as num).toDouble(),
-            greaterThan(0));
+        expect((stacks.first["totalVolume"] as num).toDouble(), greaterThan(0));
       });
     },
   );

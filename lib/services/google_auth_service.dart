@@ -43,23 +43,19 @@ class GoogleAuthService {
       );
     }
 
-    final GoogleSignInAccount googleUser =
-        await _googleSignIn.authenticate();
+    final GoogleSignInAccount googleUser = await _googleSignIn.authenticate();
 
-    final GoogleSignInAuthentication googleAuth =
-        googleUser.authentication;
+    final GoogleSignInAuthentication googleAuth = googleUser.authentication;
 
     final credential = GoogleAuthProvider.credential(
       idToken: googleAuth.idToken,
     );
 
-    final userCredential =
-        await _auth.signInWithCredential(credential);
+    final userCredential = await _auth.signInWithCredential(credential);
 
     final user = userCredential.user!;
 
-    final doc =
-        _firestore.collection("users").doc(user.uid);
+    final doc = _firestore.collection("users").doc(user.uid);
 
     if (!(await doc.get()).exists) {
       await doc.set({

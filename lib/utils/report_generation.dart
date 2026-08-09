@@ -8,6 +8,13 @@ import '../models/stack_model.dart';
 import '../screens/report_preview_screen.dart';
 import '../services/report_service.dart';
 
+/// The export formats the specification requires.
+///
+/// PDF for a document to hand over or print; CSV so the same figures can be
+/// opened in Excel and worked with, which is what a merchant reconciling a
+/// month of sales actually needs.
+enum ReportFormat { pdf, csv }
+
 /// Generates and opens a PDF report for [stack], or for a single
 /// [standaloneLog] treated as a synthetic one-log "stack". Exactly one of
 /// the two must be provided.
@@ -15,6 +22,7 @@ Future<void> generateAndOpenReport(
   BuildContext context, {
   StackModel? stack,
   LogModel? standaloneLog,
+  ReportFormat format = ReportFormat.pdf,
 }) async {
   assert(
     (stack == null) != (standaloneLog == null),
@@ -51,10 +59,33 @@ Future<void> generateAndOpenReport(
 
   if (!context.mounted) return;
 
-  final file = await ReportService().generateStackReport(
-    stack: resolvedStack,
-    company: await _companyFromProfile(),
-    generatedAt: DateTime.now(),
+  final service = ReportService();
+  final company = await _companyFromProfile();
+  final generatedAt = DateTime.now();
+
+  final file = switch (format) {
+    ReportFormat.pdf => await service.generateStackReport(
+        stack: resolvedStack,
+        company: company,
+        generatedAt: generatedAt,
+      ),
+    ReportFormat.csv => await service.generateStackCsv(
+        stack: resolvedStack,
+        company: company,
+        generatedAt: generatedAt,
+      ),
+  };
+
+  // The report history. Kept so a document already handed to a buyer can be
+  // found and re-sent, rather than regenerated from data that may since have
+  // changed underneath it.
+  await LocalDB.saveReport(
+    stackId: standaloneLog == null ? resolvedStack.id : null,
+    logId: standaloneLog?.id,
+    format: format.name,
+    filePath: file.path,
+    totalVolumeCubicFeet: resolvedStack.totalVolume,
+    totalCost: resolvedStack.totalCost,
   );
 
   if (!context.mounted) return;

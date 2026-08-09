@@ -188,9 +188,9 @@ class LogGeometry {
     final a3 = 4 * mz;
     final a2 = -3 * mz * mz - mzz;
     final a1 = varZ * mz + 4 * covXy * mz - mxz * mxz - myz * myz;
-    final a0 =
-        mxz * (mxz * myy - myz * mxy) + myz * (myz * mxx - mxz * mxy) -
-            varZ * covXy;
+    final a0 = mxz * (mxz * myy - myz * mxy) +
+        myz * (myz * mxx - mxz * mxy) -
+        varZ * covXy;
 
     final a22 = a2 + a2;
     final a33 = a3 + a3 + a3;
@@ -220,8 +220,7 @@ class LogGeometry {
     final centerX = (mxz * (myy - x) - myz * mxy) / det / 2;
     final centerY = (myz * (mxx - x) - mxz * mxy) / det / 2;
 
-    final radius =
-        math.sqrt(centerX * centerX + centerY * centerY + mz);
+    final radius = math.sqrt(centerX * centerX + centerY * centerY + mz);
 
     if (!radius.isFinite || radius <= 0) return null;
 
@@ -727,9 +726,8 @@ class LogGeometry {
   static ({Vector3 u, Vector3 v}) _perpendicularBasis(Vector3 direction) {
     // Pick whichever cardinal axis is least aligned with the direction, so
     // the cross product is never near-degenerate.
-    final helper = direction.x.abs() < 0.9
-        ? Vector3(1, 0, 0)
-        : Vector3(0, 1, 0);
+    final helper =
+        direction.x.abs() < 0.9 ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
 
     final u = direction.cross(helper).normalized();
     final v = direction.cross(u).normalized();
@@ -766,10 +764,8 @@ class LogGeometry {
     final bSq = b.x * b.x + b.y * b.y;
     final cSq = c.x * c.x + c.y * c.y;
 
-    final ux =
-        (aSq * (b.y - c.y) + bSq * (c.y - a.y) + cSq * (a.y - b.y)) / d;
-    final uy =
-        (aSq * (c.x - b.x) + bSq * (a.x - c.x) + cSq * (b.x - a.x)) / d;
+    final ux = (aSq * (b.y - c.y) + bSq * (c.y - a.y) + cSq * (a.y - b.y)) / d;
+    final uy = (aSq * (c.x - b.x) + bSq * (a.x - c.x) + cSq * (b.x - a.x)) / d;
 
     if (!ux.isFinite || !uy.isFinite) return null;
 

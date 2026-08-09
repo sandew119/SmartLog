@@ -117,23 +117,18 @@ class _ManualMeasurementSheetState extends State<_ManualMeasurementSheet> {
                   ),
                 ),
               ),
-
               const Text(
                 "Enter Log Measurements",
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               ),
-
               const SizedBox(height: 6),
-
               Text(
                 widget.reason ??
                     "Measure the log at its thinnest point, then enter the "
                         "length.",
                 style: const TextStyle(color: Colors.grey),
               ),
-
               const SizedBox(height: 16),
-
               SegmentedButton<_Units>(
                 segments: const [
                   ButtonSegment(
@@ -150,9 +145,7 @@ class _ManualMeasurementSheetState extends State<_ManualMeasurementSheet> {
                   setState(() => _units = selection.first);
                 },
               ),
-
               const SizedBox(height: 16),
-
               TextField(
                 controller: _diameterController,
                 autofocus: true,
@@ -165,9 +158,7 @@ class _ManualMeasurementSheetState extends State<_ManualMeasurementSheet> {
                   border: const OutlineInputBorder(),
                 ),
               ),
-
               const SizedBox(height: 12),
-
               TextField(
                 controller: _lengthController,
                 keyboardType: const TextInputType.numberWithOptions(
@@ -180,7 +171,6 @@ class _ManualMeasurementSheetState extends State<_ManualMeasurementSheet> {
                 ),
                 onSubmitted: (_) => _confirm(),
               ),
-
               if (_error != null) ...[
                 const SizedBox(height: 10),
                 Text(
@@ -188,9 +178,7 @@ class _ManualMeasurementSheetState extends State<_ManualMeasurementSheet> {
                   style: const TextStyle(color: Colors.red, fontSize: 13),
                 ),
               ],
-
               const SizedBox(height: 20),
-
               SizedBox(
                 height: 55,
                 width: double.infinity,
@@ -200,9 +188,7 @@ class _ManualMeasurementSheetState extends State<_ManualMeasurementSheet> {
                   label: const Text("Use These Measurements"),
                 ),
               ),
-
               const SizedBox(height: 8),
-
               Center(
                 child: TextButton(
                   onPressed: () => Navigator.pop(context),

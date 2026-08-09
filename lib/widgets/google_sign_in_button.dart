@@ -41,7 +41,8 @@ class GoogleSignInButton extends StatelessWidget {
                     'https://developers.google.com/identity/images/g-logo.png',
                     width: 22,
                     height: 22,
-                    errorBuilder: (_, __, ___) => const Icon(Icons.g_mobiledata),
+                    errorBuilder: (_, __, ___) =>
+                        const Icon(Icons.g_mobiledata),
                   ),
                   const SizedBox(width: 12),
                   const Text(

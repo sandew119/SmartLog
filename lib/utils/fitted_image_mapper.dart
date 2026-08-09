@@ -42,7 +42,8 @@ class FittedImageMapper {
     final w = imageSize.width * scale;
     final h = imageSize.height * scale;
 
-    return Rect.fromLTWH((boxSize.width - w) / 2, (boxSize.height - h) / 2, w, h);
+    return Rect.fromLTWH(
+        (boxSize.width - w) / 2, (boxSize.height - h) / 2, w, h);
   }
 
   /// A tap in the widget, in image pixels. Null when the tap landed on the

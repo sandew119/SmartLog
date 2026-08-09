@@ -33,8 +33,7 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> loadRememberMe() async {
     rememberMe = await LocalStorageService.getRememberMe();
 
-    final savedEmail =
-        await LocalStorageService.getUserEmail();
+    final savedEmail = await LocalStorageService.getUserEmail();
 
     emailController.text = savedEmail;
 
@@ -89,49 +88,48 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
- Future<void> googleLogin() async {
-  setState(() => googleLoading = true);
+  Future<void> googleLogin() async {
+    setState(() => googleLoading = true);
 
-  try {
-    await GoogleAuthService.instance.signIn();
+    try {
+      await GoogleAuthService.instance.signIn();
 
-    await LocalStorageService.setRememberMe(true);
+      await LocalStorageService.setRememberMe(true);
 
-    if (!mounted) return;
+      if (!mounted) return;
 
-    Navigator.pop(context);
-  } catch (e) {
-    if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
 
-    String message = e.toString();
+      String message = e.toString();
 
-    if (message.contains("network") ||
-        message.contains("Network") ||
-        message.contains("Socket") ||
-        message.contains("Unable to resolve host")) {
-      message =
-          "No internet connection. Please check your network and try again.";
-    } else if (message.contains("cancel")) {
-      message = "Google Sign-In was cancelled.";
-    } else if (message.contains("10:")) {
-      message =
-          "Google Sign-In configuration error. Please contact support.";
-    } else {
-      message = "Google Sign-In failed.\n$message";
+      if (message.contains("network") ||
+          message.contains("Network") ||
+          message.contains("Socket") ||
+          message.contains("Unable to resolve host")) {
+        message =
+            "No internet connection. Please check your network and try again.";
+      } else if (message.contains("cancel")) {
+        message = "Google Sign-In was cancelled.";
+      } else if (message.contains("10:")) {
+        message = "Google Sign-In configuration error. Please contact support.";
+      } else {
+        message = "Google Sign-In failed.\n$message";
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.red,
-      ),
-    );
+    if (mounted) {
+      setState(() => googleLoading = false);
+    }
   }
-
-  if (mounted) {
-    setState(() => googleLoading = false);
-  }
-}
 
   InputDecoration input(
     String label,
@@ -150,26 +148,20 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xffF5F7FA),
-
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
-
             child: Form(
               key: _formKey,
-
               child: Column(
                 children: [
-
                   const Icon(
                     Icons.forest,
                     size: 90,
                     color: Colors.green,
                   ),
-
                   const SizedBox(height: 20),
-
                   const Text(
                     "Welcome Back",
                     style: TextStyle(
@@ -177,22 +169,17 @@ class _LoginScreenState extends State<LoginScreen> {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
-
                   const SizedBox(height: 10),
-
                   const Text(
                     "Sign in to sync your SmartLog data",
                     style: TextStyle(
                       color: Colors.grey,
                     ),
                   ),
-
                   const SizedBox(height: 35),
-
                   TextFormField(
                     controller: emailController,
-                    keyboardType:
-                        TextInputType.emailAddress,
+                    keyboardType: TextInputType.emailAddress,
                     decoration: input(
                       "Email",
                       Icons.email_outlined,
@@ -209,9 +196,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       return null;
                     },
                   ),
-
                   const SizedBox(height: 18),
-
                   TextFormField(
                     controller: passwordController,
                     obscureText: hidePassword,
@@ -227,19 +212,15 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                         onPressed: () {
                           setState(() {
-                            hidePassword =
-                                !hidePassword;
+                            hidePassword = !hidePassword;
                           });
                         },
                       ),
                     ),
                   ),
-
                   const SizedBox(height: 10),
-
                   Row(
                     children: [
-
                       Checkbox(
                         value: rememberMe,
                         onChanged: (v) {
@@ -248,18 +229,14 @@ class _LoginScreenState extends State<LoginScreen> {
                           });
                         },
                       ),
-
                       const Text("Remember Me"),
-
                       const Spacer(),
-
                       TextButton(
                         onPressed: () {
                           Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (_) =>
-                                  const PasswordForgotScreen(),
+                              builder: (_) => const PasswordForgotScreen(),
                             ),
                           );
                         },
@@ -269,30 +246,23 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     ],
                   ),
-
                   const SizedBox(height: 20),
-
                   SizedBox(
                     width: double.infinity,
                     height: 55,
                     child: ElevatedButton(
-                      onPressed:
-                          loading ? null : login,
+                      onPressed: loading ? null : login,
                       child: loading
                           ? const CircularProgressIndicator()
                           : const Text("Login"),
                     ),
                   ),
-
                   const SizedBox(height: 15),
-
                   SizedBox(
                     width: double.infinity,
                     height: 55,
                     child: OutlinedButton.icon(
-                      onPressed: googleLoading
-                          ? null
-                          : googleLogin,
+                      onPressed: googleLoading ? null : googleLogin,
                       icon: const Icon(
                         Icons.g_mobiledata,
                         size: 34,
@@ -304,25 +274,19 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                     ),
                   ),
-
                   const SizedBox(height: 20),
-
                   Row(
-                    mainAxisAlignment:
-                        MainAxisAlignment.center,
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-
                       const Text(
                         "Don't have an account?",
                       ),
-
                       TextButton(
                         onPressed: () {
                           Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (_) =>
-                                  const RegisterScreen(),
+                              builder: (_) => const RegisterScreen(),
                             ),
                           );
                         },
@@ -330,7 +294,6 @@ class _LoginScreenState extends State<LoginScreen> {
                           "Create Account",
                         ),
                       ),
-
                     ],
                   ),
                 ],

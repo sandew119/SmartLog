@@ -25,12 +25,51 @@ class _ReportsScreenState extends State<ReportsScreen> {
   }
 
   Future<void> _generate(SavedItem item) async {
+    // PDF to hand over or print, CSV to reconcile in Excel. Asked rather
+    // than assumed, because they are genuinely different jobs.
+    final format = await showModalBottomSheet<ReportFormat>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                "Export as",
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.picture_as_pdf, color: Colors.red),
+              title: const Text("PDF document"),
+              subtitle: const Text("For printing or sending to a buyer"),
+              onTap: () => Navigator.pop(sheetContext, ReportFormat.pdf),
+            ),
+            ListTile(
+              leading: const Icon(Icons.table_chart, color: Colors.green),
+              title: const Text("CSV spreadsheet"),
+              subtitle: const Text("Opens in Excel, one row per log"),
+              onTap: () => Navigator.pop(sheetContext, ReportFormat.csv),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+
+    if (format == null || !mounted) return;
+
     setState(() => _generating = true);
 
     if (item.stack != null) {
-      await generateAndOpenReport(context, stack: item.stack);
+      await generateAndOpenReport(context, stack: item.stack, format: format);
     } else {
-      await generateAndOpenReport(context, standaloneLog: item.log);
+      await generateAndOpenReport(
+        context,
+        standaloneLog: item.log,
+        format: format,
+      );
     }
 
     if (!mounted) return;

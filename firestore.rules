@@ -1,0 +1,37 @@
+rules_version = '2';
+
+// Smart Log keeps the phone's SQLite database as the source of truth and
+// mirrors it into Firestore. Every document the app writes therefore lives
+// under the signed-in user's own node:
+//
+//   users/{uid}                                  profile + preferences
+//   users/{uid}/stacks/{deviceId}_{stackId}      a saved stack
+//   users/{uid}/stacks/{...}/logs/{...}          the logs in that stack
+//   users/{uid}/standaloneLogs/{deviceId}_{id}   logs saved without a stack
+//
+// So one ownership check covers the whole app, and anything that does not
+// match the shape above is denied by default.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    // The profile document itself.
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      // Everything beneath it: stacks, their logs, standalone logs.
+      //
+      // Written as an explicit nested match rather than
+      // `/users/{userId}/{document=**}` because whether a recursive wildcard
+      // also matches the parent document depends on the rules version, and a
+      // rule that silently stops covering the profile is exactly the kind of
+      // mistake nobody notices until the data is already public.
+      match /{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+  }
+}

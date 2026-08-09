@@ -236,9 +236,8 @@ class PointCloudSegmenter {
     required double toleranceMetres,
     required double minExtentMetres,
   }) {
-    final helper = plane.normal.x.abs() < 0.9
-        ? Vector3(1, 0, 0)
-        : Vector3(0, 1, 0);
+    final helper =
+        plane.normal.x.abs() < 0.9 ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
 
     final u = plane.normal.cross(helper).normalized();
     final v = plane.normal.cross(u).normalized();
@@ -342,8 +341,7 @@ class PointCloudSegmenter {
       for (var dx = -1; dx <= 1; dx++) {
         for (var dy = -1; dy <= 1; dy++) {
           for (var dz = -1; dz <= 1; dz++) {
-            final bucket =
-                grid[(key.$1 + dx, key.$2 + dy, key.$3 + dz)];
+            final bucket = grid[(key.$1 + dx, key.$2 + dy, key.$3 + dz)];
             if (bucket == null) continue;
 
             for (final candidate in bucket) {

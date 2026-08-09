@@ -19,8 +19,7 @@ List<Vector3> cylinderCloud({
   final length = axis.length;
   final direction = axis.normalized();
 
-  final helper =
-      direction.x.abs() < 0.9 ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
+  final helper = direction.x.abs() < 0.9 ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
   final u = direction.cross(helper).normalized();
   final v = direction.cross(u).normalized();
 
@@ -49,8 +48,7 @@ List<Vector3> cylinderCloud({
 /// device: a point cloud in, a finished measurement in trade units out.
 /// Real clouds captured on-device can be dropped in here later as fixtures.
 void main() {
-  test('turns a synthetic cylinder into a measurement in inches and feet',
-      () {
+  test('turns a synthetic cylinder into a measurement in inches and feet', () {
     // 0.25 m radius (0.5 m diameter ~= 19.7 in), 3 m long (~9.84 ft).
     final start = Vector3(0, 0, 2);
     final end = Vector3(0, 0, 5);
@@ -80,8 +78,7 @@ void main() {
     expect(measurement.limitingFactorMessage, isNull);
   });
 
-  test('grades a narrowly-visible log as unreliable rather than saving it',
-      () {
+  test('grades a narrowly-visible log as unreliable rather than saving it', () {
     final start = Vector3(0, 0, 2);
     final end = Vector3(0, 0, 4);
 

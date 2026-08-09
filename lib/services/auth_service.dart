@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
+import '../database/local_db.dart';
+
 class AuthService {
   AuthService._();
 
@@ -35,8 +37,7 @@ class AuthService {
     String company = "",
   }) async {
     try {
-      final credential =
-          await _auth.createUserWithEmailAndPassword(
+      final credential = await _auth.createUserWithEmailAndPassword(
         email: email.trim(),
         password: password.trim(),
       );
@@ -45,10 +46,7 @@ class AuthService {
 
       await credential.user!.sendEmailVerification();
 
-      await _firestore
-          .collection("users")
-          .doc(credential.user!.uid)
-          .set({
+      await _firestore.collection("users").doc(credential.user!.uid).set({
         "uid": credential.user!.uid,
         "name": name,
         "email": email.trim(),
@@ -59,6 +57,20 @@ class AuthService {
         "emailVerified": false,
         "createdAt": FieldValue.serverTimestamp(),
       });
+
+      // The local copy of the profile.
+      //
+      // Firebase holds the account, but a phone with no signal still has to
+      // be able to name whose stacks these are and put a company on a report.
+      // Deliberately no password column: credentials stay in Firebase and
+      // the session token in the platform keystore, never in this file.
+      await LocalDB.saveUserProfile(
+        uid: credential.user!.uid,
+        name: name,
+        email: email.trim(),
+        phone: phone,
+        company: company,
+      );
 
       return credential;
     } on FirebaseAuthException catch (e) {
@@ -84,10 +96,7 @@ class AuthService {
     final user = _auth.currentUser;
 
     if (user != null) {
-      await _firestore
-          .collection("users")
-          .doc(user.uid)
-          .update({
+      await _firestore.collection("users").doc(user.uid).update({
         "emailVerified": user.emailVerified,
       });
     }

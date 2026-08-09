@@ -1,8 +1,11 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../../app_info.dart';
 import '../../services/google_auth_service.dart';
+import '../../widgets/cloud_backup_card.dart';
 import '../../widgets/measurement_settings_card.dart';
+import '../developer_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -13,6 +16,29 @@ class ProfileScreen extends StatefulWidget {
 
 class _ProfileScreenState extends State<ProfileScreen> {
   User? get user => FirebaseAuth.instance.currentUser;
+
+  /// Taps on the version line. Five opens the developer screen.
+  ///
+  /// The long-standing convention for this, and it is the right one here: the
+  /// screen behind it shows raw table names and queue internals, which would
+  /// only worry someone who wandered into it. Nobody reaches five taps on a
+  /// version number by accident.
+  int _versionTaps = 0;
+
+  static const int _tapsToUnlock = 5;
+
+  void _tapVersion() {
+    _versionTaps++;
+
+    if (_versionTaps < _tapsToUnlock) return;
+
+    _versionTaps = 0;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const DeveloperScreen()),
+    );
+  }
 
   Future<void> _refreshUser() async {
     await user?.reload();
@@ -103,10 +129,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ),
             ),
 
-            if (currentUser != null &&
-                !currentUser.emailVerified) ...[
+            if (currentUser != null && !currentUser.emailVerified) ...[
               const SizedBox(height: 15),
-
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
@@ -132,9 +156,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   label: const Text("Send Verification Email"),
                 ),
               ),
-
               const SizedBox(height: 10),
-
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
@@ -150,6 +172,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
             // Available to guests too -- measurement settings are stored
             // locally first and only mirrored to the cloud when signed in.
             const MeasurementSettingsCard(),
+
+            const SizedBox(height: 20),
+
+            CloudBackupCard(signedIn: currentUser != null),
 
             const SizedBox(height: 30),
 
@@ -171,6 +197,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
 
             const SizedBox(height: 20),
+
+            // Also the way into the developer screen -- see [_tapVersion].
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _tapVersion,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  "Smart Log v$appVersion",
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 10),
           ],
         ),
       ),

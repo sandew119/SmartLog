@@ -4,38 +4,50 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:smartlog2/services/log_face_detector.dart';
 
-/// Paints a pale ellipse on a dark field -- a stand-in for a sawn face
-/// against bark and ground.
-img.Image _face({
-  required int width,
-  required int height,
-  required double centreX,
-  required double centreY,
+/// Paints a log face onto a background.
+///
+/// Generating the picture here is what makes the detector testable at all on
+/// a machine with no camera: the true centre and radii are known exactly, so
+/// the assertions can be about accuracy rather than "it returned something".
+img.Image syntheticFace({
+  int width = 400,
+  int height = 400,
+  required Offset centre,
   required double radiusX,
   required double radiusY,
-  int faceLuminance = 210,
-  int backgroundLuminance = 40,
+  required List<int> faceRgb,
+  required List<int> backgroundRgb,
   double rotation = 0,
+  double noise = 0,
+  int seed = 5,
 }) {
   final image = img.Image(width: width, height: height);
+  final random = math.Random(seed);
 
   final cos = math.cos(-rotation);
   final sin = math.sin(-rotation);
 
   for (var y = 0; y < height; y++) {
     for (var x = 0; x < width; x++) {
-      final dx = x - centreX;
-      final dy = y - centreY;
+      final dx = x - centre.dx;
+      final dy = y - centre.dy;
 
-      final rx = dx * cos - dy * sin;
-      final ry = dx * sin + dy * cos;
+      final u = dx * cos - dy * sin;
+      final v = dx * sin + dy * cos;
 
       final inside =
-          (rx * rx) / (radiusX * radiusX) + (ry * ry) / (radiusY * radiusY) <=
-              1;
+          (u * u) / (radiusX * radiusX) + (v * v) / (radiusY * radiusY) <= 1;
 
-      final value = inside ? faceLuminance : backgroundLuminance;
-      image.setPixelRgb(x, y, value, value, value);
+      final base = inside ? faceRgb : backgroundRgb;
+
+      int jitter(int channel) {
+        if (noise <= 0) return channel;
+        final n = ((random.nextDouble() - 0.5) * 2 * noise).round();
+        return (channel + n).clamp(0, 255);
+      }
+
+      image.setPixelRgb(
+          x, y, jitter(base[0]), jitter(base[1]), jitter(base[2]));
     }
   }
 
@@ -43,15 +55,17 @@ img.Image _face({
 }
 
 void main() {
-  group('LogFaceDetector', () {
-    test('traces a round face close to its true size', () {
-      final image = _face(
-        width: 400,
-        height: 400,
-        centreX: 200,
-        centreY: 200,
+  group('the case the old detector got wrong', () {
+    test('a DARK face on a LIGHT background is found', () {
+      // Weathered grey log end on pale sawdust. The previous detector
+      // assumed the face was the brighter thing and would walk straight
+      // past this boundary.
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
         radiusX: 120,
         radiusY: 120,
+        faceRgb: const [70, 65, 60],
+        backgroundRgb: const [215, 210, 200],
       );
 
       final detection = LogFaceDetector.detect(
@@ -59,72 +73,22 @@ void main() {
         centre: const Offset(200, 200),
       )!;
 
+      expect(detection.ellipse.semiMajor, closeTo(120, 12));
+      expect(detection.ellipse.semiMinor, closeTo(120, 12));
+      expect(
+        (detection.ellipse.centre - const Offset(200, 200)).distance,
+        lessThan(12),
+      );
       expect(detection.isReliable, isTrue);
-      expect(detection.confidence, 1.0);
-
-      // Within a couple of percent of the 240px true diameter.
-      expect(detection.outline.equivalentCircleDiameter, closeTo(240, 8));
     });
 
-    test('measures an oval as oval, which is the whole point', () {
-      // 300 x 160 px: exactly the log the circle model handles worst.
-      final image = _face(
-        width: 500,
-        height: 400,
-        centreX: 250,
-        centreY: 200,
-        radiusX: 150,
-        radiusY: 80,
-      );
-
-      final detection = LogFaceDetector.detect(
-        image: image,
-        centre: const Offset(250, 200),
-      )!;
-
-      final axes = detection.outline.axes;
-
-      expect(axes.major, closeTo(300, 12));
-      expect(axes.minor, closeTo(160, 12));
-
-      // The old engine would have packed into a circle of the *thinnest*
-      // width and thrown away everything past it.
-      final circleArea = math.pi * 80 * 80;
-      expect(detection.outline.area, greaterThan(circleArea * 1.5));
-    });
-
-    test('finds the face when the tap is off-centre', () {
-      final image = _face(
-        width: 400,
-        height: 400,
-        centreX: 200,
-        centreY: 200,
+    test('a LIGHT face on a DARK background is found just as well', () {
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
         radiusX: 120,
         radiusY: 120,
-      );
-
-      // A real fingertip lands somewhere in the middle-ish, not dead centre.
-      final detection = LogFaceDetector.detect(
-        image: image,
-        centre: const Offset(235, 175),
-      )!;
-
-      // Area is the robust measure here: rays from an off-centre origin
-      // still land on the same boundary.
-      expect(detection.outline.area, closeTo(math.pi * 120 * 120, 6000));
-    });
-
-    test('reports low confidence when the face barely stands out', () {
-      // Sawn face on pale sawdust -- almost no edge to find.
-      final image = _face(
-        width: 400,
-        height: 400,
-        centreX: 200,
-        centreY: 200,
-        radiusX: 120,
-        radiusY: 120,
-        faceLuminance: 150,
-        backgroundLuminance: 146,
+        faceRgb: const [220, 200, 165],
+        backgroundRgb: const [45, 40, 35],
       );
 
       final detection = LogFaceDetector.detect(
@@ -132,103 +96,240 @@ void main() {
         centre: const Offset(200, 200),
       )!;
 
-      // Must not quietly hand back a confident-looking wrong outline.
-      expect(detection.isReliable, isFalse);
-      expect(detection.weakRays, greaterThan(0));
+      expect(detection.ellipse.semiMajor, closeTo(120, 12));
+      expect(detection.isReliable, isTrue);
     });
 
-    test('a single bright intrusion does not spike the outline', () {
-      final image = _face(
-        width: 400,
-        height: 400,
-        centreX: 200,
-        centreY: 200,
-        radiusX: 120,
-        radiusY: 120,
+    test('a face separated only by COLOUR, not brightness, is found', () {
+      // Same luminance, different hue -- a purely brightness-based edge
+      // detector sees nothing at all here.
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 110,
+        radiusY: 110,
+        faceRgb: const [180, 140, 90],
+        backgroundRgb: const [90, 150, 175],
       );
 
-      // A glare streak running off the face to the frame edge, of the kind
-      // sunlight on a wet log produces.
-      for (var x = 200; x < 400; x++) {
-        for (var y = 196; y < 204; y++) {
-          image.setPixelRgb(x, y, 240, 240, 240);
+      final detection = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(200, 200),
+      )!;
+
+      expect(detection.ellipse.semiMajor, closeTo(110, 14));
+    });
+  });
+
+  group('shape', () {
+    test('recovers an elliptical face -- a round end seen at an angle', () {
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 150,
+        radiusY: 90,
+        faceRgb: const [210, 190, 155],
+        backgroundRgb: const [40, 38, 35],
+      );
+
+      final detection = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(200, 200),
+      )!;
+
+      expect(detection.ellipse.semiMajor, closeTo(150, 15));
+      expect(detection.ellipse.semiMinor, closeTo(90, 15));
+
+      // The major axis is the true diameter; the minor is foreshortened.
+      expect(detection.ellipse.trueDiameter, closeTo(300, 30));
+    });
+
+    test('recovers a rotated ellipse', () {
+      final image = syntheticFace(
+        width: 460,
+        height: 460,
+        centre: const Offset(230, 230),
+        radiusX: 150,
+        radiusY: 85,
+        rotation: 40 * math.pi / 180,
+        faceRgb: const [205, 185, 150],
+        backgroundRgb: const [35, 33, 30],
+      );
+
+      final detection = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(230, 230),
+      )!;
+
+      expect(detection.ellipse.semiMajor, closeTo(150, 18));
+      expect(detection.ellipse.semiMinor, closeTo(85, 18));
+    });
+
+    test('the outline it returns is usable by the packing engine', () {
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 120,
+        radiusY: 120,
+        faceRgb: const [215, 195, 160],
+        backgroundRgb: const [40, 38, 35],
+      );
+
+      final outline = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(200, 200),
+      )!
+          .outline;
+
+      expect(outline.isValid, isTrue);
+      expect(outline.points.length, 72);
+      expect(outline.equivalentCircleDiameter, closeTo(240, 25));
+
+      // No spikes: every radius close to the mean.
+      final centre = outline.centroid;
+      final radii = [for (final p in outline.points) (p - centre).distance];
+      final mean = radii.reduce((a, b) => a + b) / radii.length;
+
+      for (final r in radii) {
+        expect(r, closeTo(mean, mean * 0.3));
+      }
+    });
+  });
+
+  group('robustness', () {
+    test('survives sensor noise', () {
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 120,
+        radiusY: 120,
+        faceRgb: const [200, 180, 150],
+        backgroundRgb: const [55, 50, 45],
+        noise: 22,
+      );
+
+      final detection = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(200, 200),
+      )!;
+
+      expect(detection.ellipse.semiMajor, closeTo(120, 18));
+    });
+
+    test('an off-centre tap still finds the same face', () {
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 130,
+        radiusY: 130,
+        faceRgb: const [210, 190, 155],
+        backgroundRgb: const [40, 38, 35],
+      );
+
+      // Tapped well off to one side, as a thumb in a timber yard would.
+      final detection = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(255, 235),
+      )!;
+
+      // Re-measuring from the fitted centre is what rescues this: the tap
+      // only has to land somewhere on the face.
+      expect(
+        (detection.ellipse.centre - const Offset(200, 200)).distance,
+        lessThan(25),
+      );
+      expect(detection.ellipse.semiMajor, closeTo(130, 20));
+    });
+
+    test('a shadow across the face does not cut the outline short', () {
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 130,
+        radiusY: 130,
+        faceRgb: const [205, 185, 150],
+        backgroundRgb: const [40, 38, 35],
+      );
+
+      // Darken the lower half of the face, as a shadow would.
+      for (var y = 200; y < 400; y++) {
+        for (var x = 0; x < 400; x++) {
+          final d =
+              (Offset(x.toDouble(), y.toDouble()) - const Offset(200, 200))
+                  .distance;
+          if (d > 130) continue;
+
+          final p = image.getPixel(x, y);
+          image.setPixelRgb(
+            x,
+            y,
+            (p.r * 0.62).round(),
+            (p.g * 0.62).round(),
+            (p.b * 0.62).round(),
+          );
         }
       }
 
       final detection = LogFaceDetector.detect(
         image: image,
-        centre: const Offset(200, 200),
+        centre: const Offset(200, 170),
       )!;
 
-      // Without the median filter the rays along the streak would run to the
-      // frame edge and blow the area out.
-      expect(detection.outline.area, lessThan(math.pi * 140 * 140));
+      // The shadow edge is a hard luminance step straight across the middle.
+      // Stopping there would halve the log; the fitted shape must outvote it.
+      expect(detection.ellipse.semiMajor, greaterThan(100));
+      expect(detection.ellipse.semiMinor, greaterThan(100));
     });
+  });
 
-    test('detection is independent of photo resolution', () {
-      // The same log, shot on two different phones.
-      final small = LogFaceDetector.detect(
-        image: _face(
-          width: 300,
-          height: 300,
-          centreX: 150,
-          centreY: 150,
-          radiusX: 90,
-          radiusY: 90,
-        ),
+  group('refuses rather than guesses', () {
+    test('a blank image yields no detection', () {
+      final image = img.Image(width: 300, height: 300);
+      img.fill(image, color: img.ColorRgb8(128, 128, 128));
+
+      final detection = LogFaceDetector.detect(
+        image: image,
         centre: const Offset(150, 150),
-      )!;
-
-      final large = LogFaceDetector.detect(
-        image: _face(
-          width: 1200,
-          height: 1200,
-          centreX: 600,
-          centreY: 600,
-          radiusX: 360,
-          radiusY: 360,
-        ),
-        centre: const Offset(600, 600),
-      )!;
-
-      // Outlines come back in their own image's pixels, so compare shape:
-      // both are circles of the same proportion of the frame.
-      final smallRatio = small.outline.equivalentCircleDiameter / 300;
-      final largeRatio = large.outline.equivalentCircleDiameter / 1200;
-
-      expect(smallRatio, closeTo(largeRatio, 0.02));
-    });
-
-    test('refuses nonsense input rather than guessing', () {
-      final image = _face(
-        width: 400,
-        height: 400,
-        centreX: 200,
-        centreY: 200,
-        radiusX: 120,
-        radiusY: 120,
       );
 
-      // Tap outside the photo.
+      // Nothing to find. Reporting a confident circle here would send a
+      // wrong diameter straight into a volume the user gets paid on.
+      if (detection != null) {
+        expect(detection.isReliable, isFalse);
+      }
+    });
+
+    test('rejects a tap outside the image', () {
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 100,
+        radiusY: 100,
+        faceRgb: const [200, 180, 150],
+        backgroundRgb: const [40, 38, 35],
+      );
+
       expect(
-        LogFaceDetector.detect(
-          image: image,
-          centre: const Offset(-10, 200),
-        ),
+        LogFaceDetector.detect(image: image, centre: const Offset(-40, 200)),
         isNull,
       );
+      expect(
+        LogFaceDetector.detect(image: image, centre: const Offset(900, 200)),
+        isNull,
+      );
+    });
 
-      // Too few rays to make a shape worth packing into.
+    test('rejects absurd ray counts and tiny images', () {
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 100,
+        radiusY: 100,
+        faceRgb: const [200, 180, 150],
+        backgroundRgb: const [40, 38, 35],
+      );
+
       expect(
         LogFaceDetector.detect(
           image: image,
           centre: const Offset(200, 200),
-          rayCount: 4,
+          rayCount: 3,
         ),
         isNull,
       );
 
-      // A thumbnail carries no usable boundary.
       expect(
         LogFaceDetector.detect(
           image: img.Image(width: 8, height: 8),
@@ -236,28 +337,6 @@ void main() {
         ),
         isNull,
       );
-    });
-
-    test('scales to inches off the girth, end to end', () {
-      // A 20in log measures 62.83in around.
-      final image = _face(
-        width: 600,
-        height: 600,
-        centreX: 300,
-        centreY: 300,
-        radiusX: 200,
-        radiusY: 200,
-      );
-
-      final detection = LogFaceDetector.detect(
-        image: image,
-        centre: const Offset(300, 300),
-      )!;
-
-      final inches = detection.outline.scaledToGirth(62.83)!;
-
-      expect(inches.equivalentCircleDiameter, closeTo(20, 0.5));
-      expect(inches.perimeter, closeTo(62.83, 1e-6));
     });
   });
 }

@@ -7,7 +7,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
-import '../models/cutting_models.dart';
+import '../models/sawing_models.dart';
 import '../models/stack_model.dart';
 import '../utils/timber_volume.dart';
 
@@ -138,8 +138,13 @@ class ReportService {
     return file;
   }
 
-  Future<File> generateReport({
-    required CuttingResult result,
+  /// A cut sheet the sawyer can work from at the bench.
+  ///
+  /// Deliberately not a picture of the pattern: what someone standing at a
+  /// saw needs is the order of the passes and the setback for each one. The
+  /// pattern is on the phone; this is the paper beside the machine.
+  Future<File> generateCuttingReport({
+    required SawPlan plan,
     File? capturedImage,
   }) async {
     final pdf = pw.Document();
@@ -152,6 +157,19 @@ class ReportService {
       );
     }
 
+    final kerfCubicFeet =
+        (plan.kerfAreaMm2 * plan.logLengthMm) / (304.8 * 304.8 * 304.8);
+    final edgingCubicFeet =
+        (plan.edgingAreaMm2 * plan.logLengthMm) / (304.8 * 304.8 * 304.8);
+
+    // Grouped by finished size, because a yard picks stock by size and not
+    // by which numbered board it happened to be.
+    final sizes = <String, int>{};
+    for (final board in plan.boards) {
+      final key = "${board.width.round()} x ${board.thickness.round()} mm";
+      sizes[key] = (sizes[key] ?? 0) + 1;
+    }
+
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
@@ -159,105 +177,95 @@ class ReportService {
           return [
             pw.Center(
               child: pw.Text(
-                "SMARTLOG CUTTING REPORT",
+                "SMART LOG - CUT SHEET",
                 style: pw.TextStyle(
                   fontSize: 24,
                   fontWeight: pw.FontWeight.bold,
                 ),
               ),
             ),
+            pw.SizedBox(height: 6),
+            pw.Center(
+              child: pw.Text(
+                "${plan.strategy.label} - "
+                "${_dateFormat.format(DateTime.now())}",
+                style: const pw.TextStyle(fontSize: 12),
+              ),
+            ),
             pw.SizedBox(height: 20),
             if (image != null)
               pw.Center(
                 child: pw.Container(
-                  height: 250,
+                  height: 220,
                   child: pw.Image(image),
                 ),
               ),
             pw.SizedBox(height: 20),
-            pw.Header(
-              level: 1,
-              text: "Optimization Summary",
+            pw.Header(level: 1, text: "Summary"),
+            _row("Boards", plan.boardCount.toString()),
+            _row(
+              "Sawn timber",
+              "${plan.boardVolumeCubicFeet.toStringAsFixed(3)} cu ft",
             ),
             _row(
-              "Boards Produced",
-              result.boardCount.toString(),
+              "Log volume",
+              "${plan.logVolumeCubicFeet.toStringAsFixed(3)} cu ft",
             ),
+            _row("Yield", "${plan.yieldPercent.toStringAsFixed(1)} %"),
+            _row("Sawdust", "${kerfCubicFeet.toStringAsFixed(3)} cu ft"),
             _row(
-              "Utilization",
-              "${result.utilization.toStringAsFixed(2)} %",
+              "Edgings and slabs",
+              "${edgingCubicFeet.toStringAsFixed(3)} cu ft",
             ),
+            _row("Saw passes", plan.sawPasses.toString()),
             _row(
-              "Waste",
-              "${result.waste.toStringAsFixed(2)} %",
+              "Log length",
+              "${(plan.logLengthMm / 304.8).toStringAsFixed(2)} ft",
             ),
-            _row(
-              "Estimated Profit",
-              "Rs. ${result.profit.toStringAsFixed(2)}",
-            ),
-            _row(
-              "Log Area",
-              result.logArea.toStringAsFixed(2),
-            ),
-            _row(
-              "Board Area",
-              result.boardArea.toStringAsFixed(2),
-            ),
-            _row(
-              "Waste Area",
-              result.wasteArea.toStringAsFixed(2),
-            ),
-            _row(
-              "Kerf Loss",
-              result.kerfLoss.toStringAsFixed(2),
-            ),
-            _row(
-              "Rotation",
-              "${result.angle.toStringAsFixed(0)}°",
-            ),
-            _row(
-              "Offset X",
-              result.offsetX.toStringAsFixed(2),
-            ),
-            _row(
-              "Offset Y",
-              result.offsetY.toStringAsFixed(2),
-            ),
-            pw.SizedBox(height: 25),
-            pw.Header(
-              level: 1,
-              text: "Board List",
-            ),
+            if (plan.pricePerCubicFoot > 0)
+              _row(
+                "Value at Rs. ${plan.pricePerCubicFoot.toStringAsFixed(0)}"
+                    "/cu ft",
+                "Rs. ${plan.value.toStringAsFixed(2)}",
+              ),
+            pw.SizedBox(height: 20),
+            pw.Header(level: 1, text: "Boards produced"),
             pw.TableHelper.fromTextArray(
-              headers: const [
-                "No",
-                "X",
-                "Y",
-                "Width",
-                "Height",
-                "Rotation",
+              headers: const ["Finished size", "Quantity", "Length"],
+              data: [
+                for (final entry in sizes.entries)
+                  [
+                    entry.key,
+                    entry.value.toString(),
+                    "${(plan.logLengthMm / 304.8).toStringAsFixed(2)} ft",
+                  ],
               ],
-              data: result.boards
-                  .map(
-                    (e) => [
-                      e.index,
-                      e.x.toStringAsFixed(2),
-                      e.y.toStringAsFixed(2),
-                      e.width.toStringAsFixed(2),
-                      e.height.toStringAsFixed(2),
-                      "${e.rotation.toStringAsFixed(0)}°",
-                    ],
-                  )
-                  .toList(),
+            ),
+            pw.SizedBox(height: 20),
+            pw.Header(level: 1, text: "Cut list"),
+            pw.Text(
+              "Setbacks are measured from the same reference face, in the "
+              "order listed.",
+              style: const pw.TextStyle(fontSize: 10),
+            ),
+            pw.SizedBox(height: 8),
+            pw.TableHelper.fromTextArray(
+              headers: const ["#", "Pass", "Setback (mm)"],
+              data: [
+                for (final cut in plan.cuts)
+                  [
+                    cut.order.toString(),
+                    cut.description,
+                    cut.setback.toStringAsFixed(1),
+                  ],
+              ],
             ),
             pw.SizedBox(height: 30),
             pw.Divider(),
             pw.Center(
               child: pw.Text(
                 "Generated by Smart Log",
-                style: const pw.TextStyle(
-                  fontSize: 12,
-                ),
+                style: const pw.TextStyle(fontSize: 12),
               ),
             ),
           ];
@@ -267,13 +275,9 @@ class ReportService {
 
     final dir = await getApplicationDocumentsDirectory();
 
-    final file = File(
-      "${dir.path}/SmartLog_Report.pdf",
-    );
+    final file = File("${dir.path}/SmartLog_Cut_Sheet.pdf");
 
-    await file.writeAsBytes(
-      await pdf.save(),
-    );
+    await file.writeAsBytes(await pdf.save());
 
     return file;
   }
@@ -300,6 +304,79 @@ class ReportService {
         ],
       ),
     );
+  }
+
+  /// Exports a stack as CSV.
+  ///
+  /// Written by hand rather than with a package because the whole format is
+  /// "join with commas, quote anything containing one" -- and the escaping
+  /// below is the part that actually matters: a customer named "Perera, W."
+  /// would otherwise shift every column after it by one and quietly corrupt
+  /// the volumes in the spreadsheet.
+  Future<File> generateStackCsv({
+    required StackModel stack,
+    required String company,
+    required DateTime generatedAt,
+  }) async {
+    String cell(Object? value) {
+      final text = "${value ?? ''}";
+
+      if (!text.contains(RegExp(r'[",\n]'))) return text;
+
+      return '"${text.replaceAll('"', '""')}"';
+    }
+
+    String row(List<Object?> values) => values.map(cell).join(",");
+
+    final total = StackVolumeTotal.of(
+      stack.logs.map((log) => VolumeResult.fromCubicFeet(log.volume)),
+    );
+
+    final lines = <String>[
+      row(["Smart Log measurement report"]),
+      if (company.trim().isNotEmpty) row(["Company", company]),
+      row(["Stack", stack.name]),
+      if (stack.customerName != null) row(["Customer", stack.customerName]),
+      if (stack.remarks != null) row(["Remarks", stack.remarks]),
+      row(["Generated", _dateFormat.format(generatedAt)]),
+      row([]),
+      row([
+        "No",
+        "Diameter (in)",
+        "Length (ft)",
+        "Volume (cu ft)",
+        "Cost (Rs.)",
+        "Measured by",
+        "Recorded",
+      ]),
+      for (var i = 0; i < stack.logs.length; i++)
+        row([
+          i + 1,
+          stack.logs[i].diameter.toStringAsFixed(2),
+          stack.logs[i].lengthFeet.toStringAsFixed(2),
+          stack.logs[i].volume.toStringAsFixed(3),
+          stack.logs[i].cost.toStringAsFixed(2),
+          stack.logs[i].stackId == null ? "single log" : "stack",
+          stack.logs[i].createdAt.toIso8601String(),
+        ]),
+      row([]),
+      row(["Logs", stack.logs.length]),
+      // Both the decimal figure a spreadsheet can sum and the adi/angal
+      // reading the trade actually quotes -- the PDF shows both for the same
+      // reason, and a CSV that dropped one would not reconcile against it.
+      row(["Total volume (cu ft)", stack.totalVolume.toStringAsFixed(3)]),
+      row(["Total volume (trade)", "${total.adi} adi ${total.angal} angal"]),
+      row(["Total cost (Rs.)", stack.totalCost.toStringAsFixed(2)]),
+    ];
+
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File("${dir.path}/SmartLog_Stack_${stack.id}_Report.csv");
+
+    // A BOM, so Excel opens the file as UTF-8 instead of guessing the local
+    // codepage and mangling any non-ASCII customer name.
+    await file.writeAsString("﻿${lines.join("\r\n")}\r\n");
+
+    return file;
   }
 
   Future<void> printReport(

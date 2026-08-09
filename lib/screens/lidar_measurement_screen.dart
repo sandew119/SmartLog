@@ -6,19 +6,19 @@ import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:vector_math/vector_math_64.dart' as vector;
 
-import '../models/cutting_models.dart';
 import '../utils/log_edge_detector.dart';
 
-/// Result of a completed LiDAR scan: the photo taken and a [CuttingInput]
-/// with only the log dimensions filled in (board/blade/price are left at 0
-/// for the caller to collect next in the setup sheet).
+/// Result of a completed LiDAR scan: the photo taken and the two figures the
+/// sensor measured. Everything else about the cut is collected afterwards.
 class LiDARMeasurementResult {
   final File photo;
-  final CuttingInput logDimensions;
+  final double diameterMm;
+  final double lengthMm;
 
   const LiDARMeasurementResult({
     required this.photo,
-    required this.logDimensions,
+    required this.diameterMm,
+    required this.lengthMm,
   });
 }
 
@@ -217,14 +217,8 @@ class _LiDARMeasurementScreenState extends State<LiDARMeasurementScreen> {
       context,
       LiDARMeasurementResult(
         photo: _photo!,
-        logDimensions: CuttingInput(
-          logDiameter: _diameterMeters! * 1000,
-          logLength: _lengthMeters! * 1000,
-          boardWidth: 0,
-          boardHeight: 0,
-          bladeThickness: 0,
-          boardPrice: 0,
-        ),
+        diameterMm: _diameterMeters! * 1000,
+        lengthMm: _lengthMeters! * 1000,
       ),
     );
   }

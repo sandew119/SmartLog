@@ -81,16 +81,12 @@ class _MeasurementSettingsCardState extends State<MeasurementSettingsCard> {
                     ),
                   ],
                 ),
-
                 const SizedBox(height: 4),
-
                 const Text(
                   "Applied to every log volume this app calculates.",
                   style: TextStyle(color: Colors.grey, fontSize: 12),
                 ),
-
                 const SizedBox(height: 12),
-
                 RadioGroup<VolumeMethod>(
                   groupValue: prefs.volumeMethod,
                   onChanged: (value) {
@@ -123,9 +119,7 @@ class _MeasurementSettingsCardState extends State<MeasurementSettingsCard> {
                     ],
                   ),
                 ),
-
                 const Divider(height: 24),
-
                 TextField(
                   controller: _deductionController,
                   keyboardType: const TextInputType.numberWithOptions(
@@ -144,7 +138,6 @@ class _MeasurementSettingsCardState extends State<MeasurementSettingsCard> {
                     helperMaxLines: 3,
                   ),
                 ),
-
                 const SizedBox(height: 8),
               ],
             ),

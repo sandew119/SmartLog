@@ -126,8 +126,7 @@ class LidarMeasurementSource implements MeasurementSource {
     );
 
     return LogMeasurement(
-      minDiameterInches:
-          MeasurementUnits.metresToInches(minDiameterMetres),
+      minDiameterInches: MeasurementUnits.metresToInches(minDiameterMetres),
       lengthFeet: MeasurementUnits.metresToFeet(profile.lengthMetres),
       source: MeasurementSourceKind.lidar,
       // Residual is a radial spread; a diameter spans two radii, so the

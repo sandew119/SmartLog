@@ -39,8 +39,7 @@ class LidarScannerService {
 
   static const platformViewType = "smartlog/lidar_scan_view";
 
-  static const MethodChannel _channel =
-      MethodChannel("smartlog/lidar_scanner");
+  static const MethodChannel _channel = MethodChannel("smartlog/lidar_scanner");
 
   Future<bool> isSupported() async {
     if (!Platform.isIOS) return false;

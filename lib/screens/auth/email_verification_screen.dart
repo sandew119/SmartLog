@@ -11,8 +11,7 @@ class EmailVerificationScreen extends StatefulWidget {
       _EmailVerificationScreenState();
 }
 
-class _EmailVerificationScreenState
-    extends State<EmailVerificationScreen> {
+class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   bool isVerified = false;
   bool canResend = false;
   bool loading = false;
@@ -46,14 +45,12 @@ class _EmailVerificationScreenState
   Future<void> checkVerification() async {
     await user?.reload();
 
-    final refreshedUser =
-        FirebaseAuth.instance.currentUser;
+    final refreshedUser = FirebaseAuth.instance.currentUser;
 
     if (!mounted) return;
 
     setState(() {
-      isVerified =
-          refreshedUser?.emailVerified ?? false;
+      isVerified = refreshedUser?.emailVerified ?? false;
     });
 
     if (isVerified) {
@@ -118,29 +115,22 @@ class _EmailVerificationScreenState
 
     return Scaffold(
       backgroundColor: const Color(0xffF5F7FA),
-
       appBar: AppBar(
         title: const Text("Verify Email"),
         centerTitle: true,
       ),
-
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
-
           child: Column(
             children: [
-
               const SizedBox(height: 40),
-
               const Icon(
                 Icons.mark_email_read_rounded,
                 size: 110,
                 color: Colors.green,
               ),
-
               const SizedBox(height: 25),
-
               const Text(
                 "Verify Your Email",
                 style: TextStyle(
@@ -148,9 +138,7 @@ class _EmailVerificationScreenState
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 15),
-
               Text(
                 user?.email ?? "",
                 textAlign: TextAlign.center,
@@ -159,9 +147,7 @@ class _EmailVerificationScreenState
                   color: Colors.black87,
                 ),
               ),
-
               const SizedBox(height: 25),
-
               const Text(
                 "We've sent a verification email to the address above.\n\nYou can verify now or continue to the dashboard and verify later from your profile.",
                 textAlign: TextAlign.center,
@@ -169,9 +155,8 @@ class _EmailVerificationScreenState
                   fontSize: 16,
                 ),
               ),
-
               const SizedBox(height: 35),
-                            SizedBox(
+              SizedBox(
                 width: double.infinity,
                 height: 55,
                 child: ElevatedButton.icon(
@@ -180,9 +165,7 @@ class _EmailVerificationScreenState
                     foregroundColor: Colors.white,
                   ),
                   icon: const Icon(Icons.email),
-                  onPressed: canResend
-                      ? sendVerificationEmail
-                      : null,
+                  onPressed: canResend ? sendVerificationEmail : null,
                   label: Text(
                     canResend
                         ? "Resend Verification Email"
@@ -190,9 +173,7 @@ class _EmailVerificationScreenState
                   ),
                 ),
               ),
-
               const SizedBox(height: 15),
-
               SizedBox(
                 width: double.infinity,
                 height: 55,
@@ -227,9 +208,7 @@ class _EmailVerificationScreenState
                         ),
                 ),
               ),
-
               const SizedBox(height: 15),
-
               OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
                   minimumSize: const Size(
@@ -249,9 +228,7 @@ class _EmailVerificationScreenState
                   );
                 },
               ),
-
               const SizedBox(height: 15),
-
               const Text(
                 "You can verify your email anytime from\nProfile → Email Verification.",
                 textAlign: TextAlign.center,

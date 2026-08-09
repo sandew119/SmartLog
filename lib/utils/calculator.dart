@@ -9,8 +9,7 @@ class Calculator {
 
     double lengthInches = lengthFeet * 12;
 
-    double cubicInches =
-        pi * radius * radius * lengthInches;
+    double cubicInches = pi * radius * radius * lengthInches;
 
     return cubicInches / 1728;
   }

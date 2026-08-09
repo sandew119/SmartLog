@@ -1,13 +1,14 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 
-import '../models/cutting_models.dart';
-import '../services/cutting_engine.dart';
 import '../models/log_defect.dart';
 import '../models/log_face_outline.dart';
 import '../services/lidar_service.dart';
+import '../services/sawing_engine.dart';
 import '../services/user_preferences_service.dart';
 import '../widgets/cutting_setup_sheet.dart';
 import 'cutting_result_screen.dart';
@@ -51,6 +52,19 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
   /// The tape reading that gave the outline its scale, carried forward so
   /// the setup sheet can show the real measured diameter instead of a guess.
   double? _tracedGirthInches;
+
+  /// Where the traced face sits on the photograph, so the finished plan can
+  /// be drawn back onto the log the user is looking at.
+  PatternOverlay? _overlay;
+
+  /// Filled in by the LiDAR flow, which measures the length the photo cannot.
+  double? _measuredLengthMm;
+
+  /// True while the engine is searching. It tries every rotation and offset
+  /// against a rasterised face, which is half a second on a desktop and
+  /// several times that on a phone -- long enough that it must not run on
+  /// the thread painting the screen.
+  bool _planning = false;
 
   @override
   void initState() {
@@ -126,6 +140,7 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
       _outline = null;
       _defects = const [];
       _tracedGirthInches = null;
+      _overlay = null;
     });
   }
 
@@ -134,7 +149,7 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
   /// This is what makes the photo count. Before it, the picture was only
   /// ever attached to the PDF -- the engine packed into a circle no matter
   /// what the log actually looked like.
-  Future<void> _traceFace(File photo) async {
+  Future<bool> _traceFace(File photo) async {
     final traced = await Navigator.push<LogFaceTraceResult?>(
       context,
       MaterialPageRoute(
@@ -145,7 +160,7 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
       ),
     );
 
-    if (!mounted || traced == null) return;
+    if (!mounted || traced == null) return false;
 
     // The tracing screen speaks inches, because that is what the tape reads.
     // Everything downstream of the setup sheet -- board width, blade kerf,
@@ -158,9 +173,16 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
       _outline = traced.outline.scaled(mmPerInch);
       _defects = [for (final d in traced.defects) d.scaled(mmPerInch)];
       _tracedGirthInches = traced.girthInches;
+
+      _overlay = PatternOverlay(
+        photo: photo,
+        mmPerPixel: traced.inchesPerPixel * mmPerInch,
+        faceOriginPx: traced.faceOriginPx,
+        imageSize: traced.imageSize,
+      );
     });
 
-    await _proceedManual(photo: photo);
+    return true;
   }
 
   Future<void> _openLiDARFlow() async {
@@ -189,32 +211,25 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
       return;
     }
 
-    final input = await showCuttingSetupSheet(
-      context,
-      logDimensions: result.logDimensions,
-      measuredViaLidar: true,
-    );
+    setState(() {
+      _measuredLengthMm = result.lengthMm;
 
-    if (input == null || !mounted) return;
+      // The scan measures across the face, so the girth follows -- which is
+      // exactly the number the tracing screen needs for its scale. The user
+      // gets the real shape of the face without touching a tape.
+      _tracedGirthInches = math.pi * result.diameterMm / 25.4;
+    });
 
-    final cuttingResult = CuttingEngine.generate(
-      input,
-      outline: _outline,
-      defects: _defects,
-      avoidDefects: UserPreferencesService.instance.current.avoidDefects,
-    );
+    // The LiDAR screen already took a photograph. Tracing it is what stops
+    // a measured log from being packed into a perfect circle -- the gap that
+    // made the sensor reading worth less than it should have been.
+    final traced = await _traceFace(result.photo);
 
     if (!mounted) return;
 
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => CuttingResultScreen(
-          imageFile: result.photo,
-          input: input,
-          result: cuttingResult,
-        ),
-      ),
+    await _plan(
+      fallbackDiameterMm: result.diameterMm,
+      lockMeasurements: !traced,
     );
   }
 
@@ -223,44 +238,56 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
     _initCamera();
   }
 
-  Future<void> _proceedManual({File? photo}) async {
+  /// Collects the cut settings, plans both strategies, and shows the result.
+  ///
+  /// One path for every way of getting here: the only difference between a
+  /// LiDAR scan, a traced photo and typed numbers is where the shape and the
+  /// scale came from, and by this point both are settled.
+  Future<void> _plan({
+    double? fallbackDiameterMm,
+    bool lockMeasurements = false,
+  }) async {
     final traced = _outline;
 
     // Pre-fill from the trace so the sheet cannot show a diameter that
-    // contradicts the shape the user just outlined. Still editable: only a
-    // LiDAR reading locks the field.
-    final input = await showCuttingSetupSheet(
+    // contradicts the shape the user just outlined.
+    final setup = await showCuttingSetupSheet(
       context,
-      logDimensions: traced == null
-          ? null
-          : CuttingInput(
-              logDiameter: traced.equivalentCircleDiameter,
-              logLength: 3000,
-              boardWidth: 150,
-              boardHeight: 50,
-              bladeThickness: 3,
-              boardPrice: 250,
-            ),
+      logDiameterMm: traced?.equivalentCircleDiameter ?? fallbackDiameterMm,
+      logLengthMm: _measuredLengthMm,
+      measuredViaLidar: lockMeasurements,
     );
 
-    if (input == null || !mounted) return;
+    if (setup == null || !mounted) return;
 
-    final cuttingResult = CuttingEngine.generate(
-      input,
-      outline: _outline,
-      defects: _defects,
+    // No photo, or a photo the user chose not to trace: fall back to a
+    // circle of the diameter they typed. Same engine, same code path -- only
+    // a poorer shape.
+    final outline = traced ?? LogFaceOutline.circle(setup.logDiameterMm);
+
+    final request = setup.toRequest(
+      outline,
+      defects: traced == null ? const [] : _defects,
       avoidDefects: UserPreferencesService.instance.current.avoidDefects,
     );
 
+    setState(() => _planning = true);
+
+    // Off the UI thread: the search is long enough to freeze the screen, and
+    // a frozen screen is indistinguishable from a crashed one.
+    final comparison = await compute(SawingEngine.planBoth, request);
+
     if (!mounted) return;
+    setState(() => _planning = false);
 
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => CuttingResultScreen(
-          imageFile: photo,
-          input: input,
-          result: cuttingResult,
+          comparison: comparison,
+          overlay: traced == null ? null : _overlay,
+          kerfMm: setup.kerfMm,
+          defects: traced == null ? const [] : _defects,
         ),
       ),
     );
@@ -280,10 +307,34 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
         centerTitle: true,
         title: const Text("Optimal Cutting"),
       ),
-      body: SafeArea(
-        child: _stage == _Stage.modeSelect
-            ? _buildModeSelect()
-            : _buildManualCamera(),
+      body: Stack(
+        children: [
+          SafeArea(
+            child: _stage == _Stage.modeSelect
+                ? _buildModeSelect()
+                : _buildManualCamera(),
+          ),
+          if (_planning) _buildPlanningOverlay(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlanningOverlay() {
+    return const ColoredBox(
+      color: Colors.black54,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Colors.white),
+            SizedBox(height: 16),
+            Text(
+              "Working out the best way to cut this log…",
+              style: TextStyle(color: Colors.white, fontSize: 15),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -480,9 +531,11 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
                       const SizedBox(width: 15),
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: () => _traceFace(
-                            File(_capturedImage!.path),
-                          ),
+                          onPressed: () async {
+                            final traced =
+                                await _traceFace(File(_capturedImage!.path));
+                            if (traced && mounted) await _plan();
+                          },
                           icon: const Icon(Icons.gesture),
                           label: const Text("Trace Face"),
                         ),
@@ -502,7 +555,7 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
           const SizedBox(height: 10),
           if (!_imageCaptured)
             TextButton(
-              onPressed: () => _proceedManual(),
+              onPressed: () => _plan(),
               child: const Text("Skip photo, enter manually"),
             ),
         ],

@@ -314,8 +314,9 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
                   children: [
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed:
-                            _stage == _Stage.aiming || _capturing ? null : _redo,
+                        onPressed: _stage == _Stage.aiming || _capturing
+                            ? null
+                            : _redo,
                         icon: const Icon(Icons.refresh, color: Colors.white),
                         label: const Text(
                           "Start over",

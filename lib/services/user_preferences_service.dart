@@ -38,8 +38,7 @@ class UserPreferences {
   }) {
     return UserPreferences(
       volumeMethod: volumeMethod ?? this.volumeMethod,
-      girthDeductionInches:
-          girthDeductionInches ?? this.girthDeductionInches,
+      girthDeductionInches: girthDeductionInches ?? this.girthDeductionInches,
       avoidDefects: avoidDefects ?? this.avoidDefects,
     );
   }
@@ -187,6 +186,48 @@ class UserPreferencesService {
 
     _notifier.value = current.copyWith(avoidDefects: value);
     await _mirror();
+  }
+
+  /// Takes settings that came back down from the cloud, as part of restoring
+  /// a phone that has none of its own.
+  ///
+  /// Writes them locally *without* mirroring them straight back up: the
+  /// values just came from there, and echoing them would put a pointless
+  /// write at the front of the queue on every restore.
+  ///
+  /// The profile document also holds the name, email, phone and company
+  /// written at registration, so unrelated keys are simply ignored rather
+  /// than treated as corrupt. Returns whether anything was actually adopted.
+  Future<bool> adoptFromCloud(Map<String, Object?> data) async {
+    final method = data["volumeMethod"];
+    final deduction = data["girthDeductionInches"];
+    final avoid = data["avoidDefects"];
+
+    if (method == null && deduction == null && avoid == null) return false;
+
+    final prefs = await SharedPreferences.getInstance();
+
+    var updated = current;
+
+    if (method is String) {
+      final parsed = _parseMethod(method);
+      await prefs.setString(_volumeMethodKey, parsed.name);
+      updated = updated.copyWith(volumeMethod: parsed);
+    }
+
+    if (deduction is num) {
+      final sanitized = sanitizeDeduction(deduction.toDouble());
+      await prefs.setDouble(_girthDeductionKey, sanitized);
+      updated = updated.copyWith(girthDeductionInches: sanitized);
+    }
+
+    if (avoid is bool) {
+      await prefs.setBool(_avoidDefectsKey, avoid);
+      updated = updated.copyWith(avoidDefects: avoid);
+    }
+
+    _notifier.value = updated;
+    return true;
   }
 
   Future<void> _mirror() async {

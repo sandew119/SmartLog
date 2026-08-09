@@ -64,8 +64,7 @@ void main() {
     expect(service.current.girthDeductionInches, 2.5);
   });
 
-  testWidgets('clearing the deduction field resets it to zero',
-      (tester) async {
+  testWidgets('clearing the deduction field resets it to zero', (tester) async {
     await service.load();
     await service.setGirthDeductionInches(3);
     await pumpCard(tester);

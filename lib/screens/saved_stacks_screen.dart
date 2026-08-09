@@ -6,6 +6,7 @@ import '../models/saved_item.dart';
 import '../models/stack_model.dart';
 import '../repositories/stack_repository.dart';
 import '../utils/report_generation.dart';
+import '../widgets/cloud_backup_banner.dart';
 import 'stack_detail_screen.dart';
 
 class SavedStacksScreen extends StatefulWidget {
@@ -20,14 +21,122 @@ class _SavedStacksScreenState extends State<SavedStacksScreen> {
 
   final _dateFormat = DateFormat("MMM d, yyyy • h:mm a");
 
+  final _searchController = TextEditingController();
+  DateTimeRange? _dateRange;
+
   @override
   void initState() {
     super.initState();
     _future = StackRepository.instance.loadSavedItems();
   }
 
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  bool get _isFiltering =>
+      _searchController.text.trim().isNotEmpty || _dateRange != null;
+
   void _reload() {
-    setState(() => _future = StackRepository.instance.loadSavedItems());
+    setState(() {
+      _future = _isFiltering
+          ? StackRepository.instance.searchSavedItems(
+              keyword: _searchController.text,
+              from: _dateRange?.start,
+              // The picker returns midnight, so an end date chosen as "today"
+              // would exclude everything saved today. Extend to the end of
+              // that day or the filter silently loses the newest records.
+              to: _dateRange == null
+                  ? null
+                  : DateTime(
+                      _dateRange!.end.year,
+                      _dateRange!.end.month,
+                      _dateRange!.end.day,
+                      23,
+                      59,
+                      59,
+                    ),
+            )
+          : StackRepository.instance.loadSavedItems();
+    });
+  }
+
+  Future<void> _pickDateRange() async {
+    final now = DateTime.now();
+
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(now.year - 5),
+      lastDate: now,
+      initialDateRange: _dateRange,
+    );
+
+    if (picked == null) return;
+
+    setState(() => _dateRange = picked);
+    _reload();
+  }
+
+  Widget _buildFilters() {
+    final range = _dateRange;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Column(
+        children: [
+          TextField(
+            controller: _searchController,
+            onChanged: (_) => _reload(),
+            decoration: InputDecoration(
+              hintText: "Search by name, customer or note",
+              prefixIcon: const Icon(Icons.search),
+              isDense: true,
+              border: const OutlineInputBorder(),
+              suffixIcon: _searchController.text.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _searchController.clear();
+                        _reload();
+                      },
+                    ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _pickDateRange,
+                  icon: const Icon(Icons.date_range, size: 18),
+                  label: Text(
+                    range == null
+                        ? "Any date"
+                        : "${DateFormat('d MMM').format(range.start)} – "
+                            "${DateFormat('d MMM').format(range.end)}",
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+              if (_isFiltering) ...[
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: () {
+                    _searchController.clear();
+                    setState(() => _dateRange = null);
+                    _reload();
+                  },
+                  child: const Text("Clear"),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _openStack(StackModel stack) async {
@@ -145,44 +254,58 @@ class _SavedStacksScreenState extends State<SavedStacksScreen> {
         title: const Text("Saved Stacks"),
         centerTitle: true,
       ),
-      body: RefreshIndicator(
-        onRefresh: () async => _reload(),
-        child: FutureBuilder<List<SavedItem>>(
-          future: _future,
-          builder: (context, snapshot) {
-            if (!snapshot.hasData) {
-              return const Center(child: CircularProgressIndicator());
-            }
+      body: Column(
+        children: [
+          // Above the list, not inside it: this is about all the user's data,
+          // not about any one stack, and it must be visible without scrolling.
+          const CloudBackupBanner(),
+          _buildFilters(),
+          Expanded(child: _buildList()),
+        ],
+      ),
+    );
+  }
 
-            final items = snapshot.data!;
+  Widget _buildList() {
+    return RefreshIndicator(
+      onRefresh: () async => _reload(),
+      child: FutureBuilder<List<SavedItem>>(
+        future: _future,
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
 
-            if (items.isEmpty) {
-              return ListView(
-                children: const [
-                  SizedBox(height: 100),
-                  Center(
-                    child: Text(
-                      "No saved stacks or logs yet.",
-                      style: TextStyle(color: Colors.grey, fontSize: 16),
-                    ),
+          final items = snapshot.data!;
+
+          if (items.isEmpty) {
+            return ListView(
+              children: [
+                const SizedBox(height: 100),
+                Center(
+                  child: Text(
+                    _isFiltering
+                        ? "Nothing matches that search."
+                        : "No saved stacks or logs yet.",
+                    style: const TextStyle(color: Colors.grey, fontSize: 16),
                   ),
-                ],
-              );
-            }
-
-            return ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: items.length,
-              itemBuilder: (context, index) {
-                final item = items[index];
-
-                return item.stack != null
-                    ? _buildStackCard(item.stack!, item.logCount)
-                    : _buildLogCard(item.log!);
-              },
+                ),
+              ],
             );
-          },
-        ),
+          }
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: items.length,
+            itemBuilder: (context, index) {
+              final item = items[index];
+
+              return item.stack != null
+                  ? _buildStackCard(item.stack!, item.logCount)
+                  : _buildLogCard(item.log!);
+            },
+          );
+        },
       ),
     );
   }

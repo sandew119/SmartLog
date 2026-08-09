@@ -23,9 +23,8 @@ List<Vector2> arcPoints({
     final t = count == 1 ? 0.0 : i / (count - 1);
     final angle = start + t * span;
 
-    final r = noiseSigma == 0
-        ? radius
-        : radius + _gaussian(random) * noiseSigma;
+    final r =
+        noiseSigma == 0 ? radius : radius + _gaussian(random) * noiseSigma;
 
     return Vector2(
       c.x + r * math.cos(angle),
@@ -59,8 +58,7 @@ List<Vector3> cylinderCloud({
   final length = axis.length;
   final direction = axis.normalized();
 
-  final helper =
-      direction.x.abs() < 0.9 ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
+  final helper = direction.x.abs() < 0.9 ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
   final u = direction.cross(helper).normalized();
   final v = direction.cross(u).normalized();
 
@@ -219,7 +217,8 @@ void main() {
 
       // RANSAC must land near the true radius; the naive fit gets dragged.
       expect((ransac.radius - 0.20).abs(), lessThan(0.02));
-      expect((ransac.radius - 0.20).abs(), lessThan((plain.radius - 0.20).abs()));
+      expect(
+          (ransac.radius - 0.20).abs(), lessThan((plain.radius - 0.20).abs()));
     });
   });
 

@@ -60,7 +60,9 @@ void main() {
       const minor = 0.12;
 
       final points = shape(
-        radiusAt: (a) => major * minor /
+        radiusAt: (a) =>
+            major *
+            minor /
             math.sqrt(
               math.pow(minor * math.cos(a), 2) +
                   math.pow(major * math.sin(a), 2),
@@ -80,11 +82,11 @@ void main() {
       expect(trace!.perimeter, greaterThan(2 * math.pi * fit.radius));
 
       // Ramanujan's approximation is exact enough to be a reference here.
-      const h = (major - minor) * (major - minor) /
+      const h = (major - minor) *
+          (major - minor) /
           ((major + minor) * (major + minor));
-      final ramanujan = math.pi *
-          (major + minor) *
-          (1 + 3 * h / (10 + math.sqrt(4 - 3 * h)));
+      final ramanujan =
+          math.pi * (major + minor) * (1 + 3 * h / (10 + math.sqrt(4 - 3 * h)));
 
       expect(trace.perimeter, closeTo(ramanujan, ramanujan * 0.01));
     });
@@ -149,7 +151,8 @@ void main() {
       )!;
 
       // The median in that bin holds, so the reading barely moves.
-      expect(traced.perimeter, closeTo(clean.perimeter, clean.perimeter * 0.01));
+      expect(
+          traced.perimeter, closeTo(clean.perimeter, clean.perimeter * 0.01));
     });
 
     test('survives surface noise without inflating the girth', () {
@@ -201,7 +204,9 @@ void main() {
       const minor = 0.12;
 
       final points = shape(
-        radiusAt: (a) => major * minor /
+        radiusAt: (a) =>
+            major *
+            minor /
             math.sqrt(
               math.pow(minor * math.cos(a), 2) +
                   math.pow(major * math.sin(a), 2),

@@ -21,7 +21,6 @@ class AppTheme {
 
   static ThemeData lightTheme = ThemeData(
     useMaterial3: true,
-
     colorScheme: ColorScheme.fromSeed(
       seedColor: primary,
       brightness: Brightness.light,
@@ -29,9 +28,7 @@ class AppTheme {
       secondary: secondary,
       error: error,
     ),
-
     scaffoldBackgroundColor: background,
-
     appBarTheme: const AppBarTheme(
       centerTitle: true,
       backgroundColor: background,
@@ -44,16 +41,14 @@ class AppTheme {
         color: textPrimary,
       ),
     ),
-
-cardTheme: CardThemeData(
-  color: surface,
-  elevation: 2,
-  shadowColor: Colors.black12,
-  shape: RoundedRectangleBorder(
-    borderRadius: BorderRadius.circular(18),
-  ),
-),
-
+    cardTheme: CardThemeData(
+      color: surface,
+      elevation: 2,
+      shadowColor: Colors.black12,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+      ),
+    ),
     elevatedButtonTheme: ElevatedButtonThemeData(
       style: ElevatedButton.styleFrom(
         backgroundColor: primary,
@@ -69,26 +64,21 @@ cardTheme: CardThemeData(
         ),
       ),
     ),
-
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: Colors.white,
-
       contentPadding: const EdgeInsets.symmetric(
         horizontal: 18,
         vertical: 18,
       ),
-
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
         borderSide: BorderSide.none,
       ),
-
       enabledBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
         borderSide: BorderSide.none,
       ),
-
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
         borderSide: const BorderSide(
@@ -96,7 +86,6 @@ cardTheme: CardThemeData(
           width: 2,
         ),
       ),
-
       errorBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
         borderSide: const BorderSide(
@@ -104,7 +93,6 @@ cardTheme: CardThemeData(
         ),
       ),
     ),
-
     snackBarTheme: SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
       backgroundColor: primary,
@@ -115,7 +103,6 @@ cardTheme: CardThemeData(
         borderRadius: BorderRadius.circular(12),
       ),
     ),
-
     textTheme: const TextTheme(
       displayLarge: TextStyle(
         fontSize: 34,
