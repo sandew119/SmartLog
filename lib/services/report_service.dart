@@ -379,20 +379,25 @@ class ReportService {
     return file;
   }
 
-  Future<void> printReport(
-    File pdfFile,
-  ) async {
+  /// Only meaningful for a PDF. A CSV handed to the PDF layout engine is
+  /// not a document it can render, so the caller hides the action instead of
+  /// offering something that cannot work.
+  Future<void> printReport(File pdfFile) async {
     await Printing.layoutPdf(
       onLayout: (_) async => pdfFile.readAsBytes(),
     );
   }
 
-  Future<void> shareReport(
-    File pdfFile,
-  ) async {
+  /// Shares the file under its own name.
+  ///
+  /// The name used to be hardcoded to "SmartLog_Report.pdf" whatever was
+  /// actually being shared, so an exported CSV arrived claiming to be a PDF
+  /// and Excel refused to open it -- the file was correct all along, the
+  /// label on it was not.
+  Future<void> shareReport(File file) async {
     await Printing.sharePdf(
-      bytes: await pdfFile.readAsBytes(),
-      filename: "SmartLog_Report.pdf",
+      bytes: await file.readAsBytes(),
+      filename: file.uri.pathSegments.last,
     );
   }
 }
