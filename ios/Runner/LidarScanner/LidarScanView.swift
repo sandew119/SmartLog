@@ -67,6 +67,17 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
     /// Shows the user what has actually been captured so far.
     private let capturedNode = SCNNode()
 
+    /// The sleeve and end caps drawn around the log the app has locked onto.
+    /// Kept apart from `capturedNode` so the points and the shape can be
+    /// rebuilt at different rates without one clearing the other.
+    private let highlightNode = SCNNode()
+
+    /// Latest coverage, computed with the progress tick and reused by the
+    /// overlay so the analysis is not run twice a second for two purposes.
+    private var latestCoverage = ScanCoverageAnalyser.Coverage.empty
+
+    private var currentTrackingState = "unknown"
+
     private var lastOverlayTime: TimeInterval = 0
 
     /// Redrawing the overlay is the most expensive thing on screen, and it
@@ -90,6 +101,7 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
         sceneView.session.delegateQueue = sessionQueue
         sceneView.automaticallyUpdatesLighting = true
         sceneView.scene.rootNode.addChildNode(capturedNode)
+        sceneView.scene.rootNode.addChildNode(highlightNode)
 
         channel.setMethodCallHandler { [weak self] call, result in
             self?.handle(call, result: result)
@@ -149,6 +161,8 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
         // captured while tracking is limited are placed against a drifting
         // world origin, which smears the accumulated cloud and would widen
         // every circle fit.
+        currentTrackingState = trackingStateName(frame.camera.trackingState)
+
         if case .normal = frame.camera.trackingState {} else { return }
 
         let now = frame.timestamp
@@ -166,6 +180,7 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
         if now - lastOverlayTime >= overlayInterval {
             lastOverlayTime = now
             refreshOverlay()
+            refreshHighlight()
         }
     }
 
@@ -221,6 +236,103 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
         }
     }
 
+    /// Draws the log the app has locked onto: a sleeve along the fitted
+    /// axis, and a disc at each end.
+    ///
+    /// The point cloud alone does not tell the user whether the app has
+    /// understood what it is looking at -- a haze of green dots looks much
+    /// the same whether it has found a log or a fence rail. The sleeve says
+    /// "this cylinder is what I am about to measure", so a mis-aimed tap is
+    /// obvious immediately rather than after the number comes out wrong.
+    ///
+    /// The end discs are the other half: they turn green only once that end
+    /// has actually been observed, which is the thing the sweep was
+    /// previously finishing without.
+    private func refreshHighlight() {
+        let coverage = latestCoverage
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+
+            self.highlightNode.childNodes.forEach { $0.removeFromParentNode() }
+
+            guard coverage.isUsable else { return }
+
+            let axis = simd_normalize(coverage.axis)
+            let midpoint = coverage.centroid
+                + axis * ((coverage.minT + coverage.maxT) / 2)
+
+            // SceneKit builds cylinders up the Y axis, so the sleeve has to
+            // be turned onto the log's own direction.
+            let orientation = simd_quatf(from: simd_float3(0, 1, 0), to: axis)
+
+            // Slightly proud of the surface, so it reads as a sleeve around
+            // the log rather than z-fighting with the points on it.
+            let sleeve = SCNCylinder(
+                radius: CGFloat(coverage.radius * 1.06),
+                height: CGFloat(coverage.axisLengthMetres)
+            )
+            sleeve.radialSegmentCount = 24
+
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor.systemGreen
+                .withAlphaComponent(0.18)
+            material.lightingModel = .constant
+            material.isDoubleSided = true
+            material.writesToDepthBuffer = false
+            sleeve.materials = [material]
+
+            let sleeveNode = SCNNode(geometry: sleeve)
+            sleeveNode.simdPosition = midpoint
+            sleeveNode.simdOrientation = orientation
+            self.highlightNode.addChildNode(sleeveNode)
+
+            self.addEndCap(
+                at: coverage.centroid + axis * coverage.minT,
+                orientation: orientation,
+                radius: coverage.radius,
+                seen: coverage.endFillStart >= 0.35
+            )
+
+            self.addEndCap(
+                at: coverage.centroid + axis * coverage.maxT,
+                orientation: orientation,
+                radius: coverage.radius,
+                seen: coverage.endFillEnd >= 0.35
+            )
+        }
+    }
+
+    /// A disc marking one end of the log: green once seen, amber while it is
+    /// still only where the points happen to stop.
+    private func addEndCap(
+        at position: simd_float3,
+        orientation: simd_quatf,
+        radius: Float,
+        seen: Bool
+    ) {
+        let disc = SCNCylinder(
+            radius: CGFloat(radius * 1.1),
+            height: 0.005
+        )
+        disc.radialSegmentCount = 24
+
+        let material = SCNMaterial()
+        material.diffuse.contents = (seen ? UIColor.systemGreen
+                                          : UIColor.systemOrange)
+            .withAlphaComponent(seen ? 0.55 : 0.35)
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        material.writesToDepthBuffer = false
+        disc.materials = [material]
+
+        let node = SCNNode(geometry: disc)
+        node.simdPosition = position
+        node.simdOrientation = orientation
+
+        highlightNode.addChildNode(node)
+    }
+
     private func accumulate(frame: ARFrame) {
         guard #available(iOS 14.0, *) else { return }
 
@@ -260,7 +372,16 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
     private func reportProgress() {
         stateLock.lock()
         let stats = accumulator.stats
+        let cloud = accumulator.snapshot(minSightings: 1)
         stateLock.unlock()
+
+        // Coverage in the log's own frame, not the world's. A bounding box
+        // grows whether the user is walking the length of the trunk or
+        // backing away from it, and says nothing about whether the two cut
+        // ends have been looked at -- which is the question that decides
+        // whether the sweep is finished.
+        let coverage = ScanCoverageAnalyser.analyse(points: cloud)
+        latestCoverage = coverage
 
         channel.invokeMethod(
             "progress",
@@ -268,6 +389,13 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
                 "pointCount": stats.pointCount,
                 "frameCount": stats.frameCount,
                 "extent": Double(stats.extent),
+                "axisLengthMetres": Double(coverage.axisLengthMetres),
+                "angularCoverageDegrees":
+                    Double(coverage.angularCoverageDegrees),
+                "endFillStart": Double(coverage.endFillStart),
+                "endFillEnd": Double(coverage.endFillEnd),
+                "axialBins": coverage.axialBins,
+                "trackingState": currentTrackingState,
             ]
         )
     }
@@ -380,6 +508,7 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
 
         tappedPoints.removeAll()
         capturedNode.geometry = nil
+        highlightNode.childNodes.forEach { $0.removeFromParentNode() }
 
         // Starting over means starting over: a cloud gathered around the
         // previous pick must not survive into the next measurement.

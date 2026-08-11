@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/lidar_scanner_service.dart';
+import '../utils/scan_coverage.dart';
 
 /// Hosts the native AR view and guides one continuous sweep of a log.
 ///
@@ -23,49 +24,17 @@ class LidarCaptureScreen extends StatefulWidget {
 
 enum _Stage { aiming, sweeping, finishing }
 
-/// Live progress reported by the native accumulator.
-class _SweepProgress {
-  final int pointCount;
-  final double extentMetres;
-
-  const _SweepProgress({this.pointCount = 0, this.extentMetres = 0});
-}
-
 class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
-  /// Enough surface to fit circles along a log with confidence. Below this
-  /// the sweep is still usable but the quality gate will likely refuse it.
-  static const int _targetPointCount = 12000;
-
-  /// A log shorter than this is almost certainly a mis-tap on something
-  /// else, so the sweep is not considered complete until it is exceeded.
-  static const double _minPlausibleLengthMetres = 0.5;
-
-  /// The sweep finishes on its own once coverage stops growing for this
-  /// long. Waiting for the user to decide they are done is one more thing
-  /// to explain and one more tap to make.
-  static const Duration _plateauBeforeFinish = Duration(milliseconds: 1600);
-
-  /// Growth below this between updates counts as "not growing".
-  static const double _plateauToleranceMetres = 0.02;
-
   int? _viewId;
   _Stage _stage = _Stage.aiming;
 
-  _SweepProgress _progress = const _SweepProgress();
+  ScanProgress _progress = const ScanProgress();
+
+  ScanCoverage get _coverage => ScanCoverage(_progress);
 
   String? _error;
   String? _hint;
   bool _capturing = false;
-
-  double _bestExtent = 0;
-  DateTime? _lastGrowth;
-  Timer? _plateauTimer;
-
-  @override
-  void dispose() {
-    _plateauTimer?.cancel();
-    super.dispose();
-  }
 
   void _onPlatformViewCreated(int id) {
     // Listen on the per-view channel so native taps, progress and session
@@ -85,10 +54,7 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
           _stage = _Stage.sweeping;
           _hint = null;
           _error = null;
-          _bestExtent = 0;
-          _lastGrowth = DateTime.now();
         });
-        _startPlateauWatch();
 
       case "progress":
         _onProgress(call.arguments);
@@ -120,70 +86,31 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
   void _onProgress(Object? arguments) {
     if (arguments is! Map) return;
 
-    final points = arguments["pointCount"];
-    final extent = arguments["extent"];
-
-    final progress = _SweepProgress(
-      pointCount: points is num ? points.toInt() : 0,
-      extentMetres: extent is num ? extent.toDouble() : 0,
-    );
-
-    if (progress.extentMetres > _bestExtent + _plateauToleranceMetres) {
-      _bestExtent = progress.extentMetres;
-      _lastGrowth = DateTime.now();
-    }
-
-    setState(() => _progress = progress);
+    setState(() => _progress = ScanProgress.fromNative(arguments));
   }
 
-  /// Watches for the sweep to stop improving, then finishes it.
-  void _startPlateauWatch() {
-    _plateauTimer?.cancel();
-
-    _plateauTimer = Timer.periodic(
-      const Duration(milliseconds: 300),
-      (_) {
-        if (!mounted || _stage != _Stage.sweeping) return;
-        if (!_hasEnoughToMeasure) return;
-
-        final since = _lastGrowth;
-        if (since == null) return;
-
-        if (DateTime.now().difference(since) >= _plateauBeforeFinish) {
-          _capture();
-        }
-      },
-    );
-  }
-
-  bool get _hasEnoughToMeasure =>
-      _progress.pointCount >= _targetPointCount &&
-      _bestExtent >= _minPlausibleLengthMetres;
+  /// Whether a measurement taken now would be worth trusting.
+  ///
+  /// Nothing finishes the sweep on the user's behalf any more. It used to
+  /// end itself once the bounding box stopped growing for 1.6 seconds,
+  /// which meant pausing to reposition -- or circling the girth before
+  /// walking the length -- ended the measurement early and silently, with a
+  /// whole end of the log never looked at.
+  bool get _hasEnoughToMeasure => _coverage.isReady;
 
   /// How far along the sweep is, for the progress ring.
-  double get _completion {
-    if (_stage == _Stage.aiming) return 0;
-
-    final byPoints = _progress.pointCount / _targetPointCount;
-    final byLength = _bestExtent / _minPlausibleLengthMetres;
-
-    final worst = byPoints < byLength ? byPoints : byLength;
-    return worst.clamp(0.0, 1.0);
-  }
+  double get _completion => _stage == _Stage.aiming ? 0 : _coverage.completion;
 
   Future<void> _redo() async {
     final id = _viewId;
     if (id == null) return;
 
-    _plateauTimer?.cancel();
     await LidarScannerService.instance.clearTaps(id);
     if (!mounted) return;
 
     setState(() {
       _stage = _Stage.aiming;
-      _progress = const _SweepProgress();
-      _bestExtent = 0;
-      _lastGrowth = null;
+      _progress = const ScanProgress();
       _hint = null;
       _error = null;
     });
@@ -192,8 +119,6 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
   Future<void> _capture() async {
     final id = _viewId;
     if (id == null || _capturing) return;
-
-    _plateauTimer?.cancel();
 
     setState(() {
       _capturing = true;
@@ -236,9 +161,10 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
 
     return switch (_stage) {
       _Stage.aiming => "Tap the log you want to measure.",
-      _Stage.sweeping => _hasEnoughToMeasure
-          ? "Good. Hold still — finishing."
-          : "Now walk slowly along the log.",
+      // The coverage model decides what to ask for next, so the headline
+      // always names the one thing standing between the user and a
+      // trustworthy measurement.
+      _Stage.sweeping => _coverage.message,
       _Stage.finishing => "Measuring…",
     };
   }
@@ -249,8 +175,8 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
         "Stand 0.7–1.5 m away. The app separates the log from the ground "
             "and from the logs beside it.",
       _Stage.sweeping =>
-        "Keep it in frame from end to end. The more of its curve the "
-            "sensor sees, the tighter the girth.",
+        "The green sleeve is the log being measured. Both end discs turn "
+            "green once that end has actually been seen.",
       _Stage.finishing => "Working out girth, length and volume.",
     };
   }
@@ -301,6 +227,17 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
             ),
           ),
 
+          // What is still outstanding. A disabled Finish button with no
+          // explanation is the most frustrating thing an app can do, so
+          // every requirement is on screen with its current state.
+          if (_stage == _Stage.sweeping)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 110,
+              child: _CoverageChecklist(coverage: _coverage),
+            ),
+
           Positioned(
             bottom: 0,
             left: 0,
@@ -327,10 +264,15 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
                     const SizedBox(width: 15),
                     Expanded(
                       child: ElevatedButton.icon(
-                        // Always available once a log is chosen: the sweep
-                        // finishes itself, but a user who can see they are
-                        // done should never have to wait for it.
-                        onPressed: (_stage == _Stage.sweeping && !_capturing)
+                        // Only once the log has actually been seen: both cut
+                        // ends and enough of the way round. Nothing finishes
+                        // on the user's behalf, and nothing lets them finish
+                        // a sweep that would produce a volume worth less
+                        // than the paper it gets printed on. The banner
+                        // above says which requirement is outstanding.
+                        onPressed: (_stage == _Stage.sweeping &&
+                                !_capturing &&
+                                _hasEnoughToMeasure)
                             ? _capture
                             : null,
                         icon: _capturing
@@ -344,7 +286,7 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
                               )
                             : const Icon(Icons.straighten),
                         label: Text(
-                          _hasEnoughToMeasure ? "Done" : "Measure now",
+                          _hasEnoughToMeasure ? "Finish" : "Keep scanning",
                         ),
                       ),
                     ),
@@ -440,6 +382,70 @@ class _GuidanceBanner extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// The requirements a sweep has to meet, and which are outstanding.
+///
+/// Shown while sweeping because the Finish button is disabled until the log
+/// has actually been seen, and a disabled button without a reason is worse
+/// than no button at all.
+class _CoverageChecklist extends StatelessWidget {
+  final ScanCoverage coverage;
+
+  const _CoverageChecklist({required this.coverage});
+
+  @override
+  Widget build(BuildContext context) {
+    final items = coverage.checklist;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final item in items)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  Icon(
+                    item.done
+                        ? Icons.check_circle
+                        : Icons.radio_button_unchecked,
+                    size: 15,
+                    color: item.done ? Colors.greenAccent : Colors.white54,
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      item.label,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: item.done ? Colors.white : Colors.white70,
+                        fontWeight:
+                            item.done ? FontWeight.w600 : FontWeight.normal,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    item.detail,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Colors.white60,
+                      fontFamily: "monospace",
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }
