@@ -193,6 +193,81 @@ void main() {
     });
   });
 
+  group('bark — the edge that was being missed', () {
+    /// A sawn face with a bark ring around it, which is what a real log
+    /// looks like: pale sawn timber, then a dark band of bark, then ground.
+    img.Image barkedFace({
+      required double woodRadius,
+      required double barkRadius,
+    }) {
+      final image = syntheticFace(
+        width: 460,
+        height: 460,
+        centre: const Offset(230, 230),
+        radiusX: barkRadius,
+        radiusY: barkRadius,
+        // Bark: dark brown, and much closer to the ground colour than to
+        // the sawn face.
+        faceRgb: const [62, 48, 38],
+        backgroundRgb: const [120, 125, 110],
+      );
+
+      // The sawn face inside the bark ring.
+      for (var y = 0; y < 460; y++) {
+        for (var x = 0; x < 460; x++) {
+          final d =
+              (Offset(x.toDouble(), y.toDouble()) - const Offset(230, 230))
+                  .distance;
+
+          if (d <= woodRadius) {
+            image.setPixelRgb(x, y, 214, 190, 152);
+          }
+        }
+      }
+
+      return image;
+    }
+
+    test('the outline reaches the outside of the bark, not the inside', () {
+      // The sapwood-to-bark step is the strongest colour change on every
+      // ray. Taking the strongest edge stopped the outline at 120 and
+      // reported a log a third narrower than it is.
+      final detection = LogFaceDetector.detect(
+        image: barkedFace(woodRadius: 120, barkRadius: 150),
+        centre: const Offset(230, 230),
+      )!;
+
+      expect(detection.ellipse.semiMajor, closeTo(150, 18));
+      expect(detection.ellipse.semiMajor, greaterThan(132));
+    });
+
+    test('a thick bark ring is still included', () {
+      final detection = LogFaceDetector.detect(
+        image: barkedFace(woodRadius: 100, barkRadius: 145),
+        centre: const Offset(230, 230),
+      )!;
+
+      expect(detection.ellipse.semiMajor, greaterThan(125));
+    });
+
+    test('a bare face with no bark is unaffected', () {
+      // The change must not push the boundary outwards when there is only
+      // one edge to find.
+      final detection = LogFaceDetector.detect(
+        image: syntheticFace(
+          centre: const Offset(200, 200),
+          radiusX: 120,
+          radiusY: 120,
+          faceRgb: const [210, 190, 155],
+          backgroundRgb: const [40, 38, 35],
+        ),
+        centre: const Offset(200, 200),
+      )!;
+
+      expect(detection.ellipse.semiMajor, closeTo(120, 12));
+    });
+  });
+
   group('robustness', () {
     test('survives sensor noise', () {
       final image = syntheticFace(

@@ -79,6 +79,23 @@ class LogFaceDetector {
   /// sampled face, before it counts as leaving the face.
   static const double _minColourStep = 1.2;
 
+  /// Minimum RGB distance across a candidate before it counts as a boundary
+  /// at all, on a 0..255 scale.
+  ///
+  /// Low enough for a weathered grey log against pale ground, high enough
+  /// that sensor noise and the shading across a curved surface do not
+  /// register as edges.
+  static const double _minEdgeContrast = 26;
+
+  /// How far past the first boundary the search will still accept an edge,
+  /// as a multiple of that first radius.
+  ///
+  /// Bark is a skin, not a second log: on any log worth sawing it is a small
+  /// fraction of the radius, so half as much again is generous. The cap is
+  /// what stops the outward preference walking off the log and onto the
+  /// grass behind it.
+  static const double _maxBarkExtension = 1.5;
+
   /// A ray whose edge sits within this fraction of the fitted radius counts
   /// as agreeing with the shape.
   static const double _agreementTolerance = 0.18;
@@ -255,7 +272,17 @@ class LogFaceDetector {
     final dx = math.cos(angle);
     final dy = math.sin(angle);
 
-    // Colour distance from the face model at every step along the ray.
+    // Colour along the ray, and how far it is from the face model.
+    //
+    // Both are needed. The distance says whether we are still on the sawn
+    // face; the colour itself is what detects a boundary, and it has to be
+    // the colour rather than the distance because a transition can move
+    // *back towards* the face colour. Bark is further from pale sawn timber
+    // than the ground behind it is, so bark-to-ground is a fall in distance
+    // and a rise-only test never sees the outer edge at all.
+    final reds = List<double>.filled(limit + 1, 0);
+    final greens = List<double>.filled(limit + 1, 0);
+    final blues = List<double>.filled(limit + 1, 0);
     final distances = List<double>.filled(limit + 1, 0);
 
     for (var r = 0; r <= limit; r++) {
@@ -263,33 +290,64 @@ class LogFaceDetector {
       final y = (origin.dy + dy * r).round();
 
       if (x < 0 || y < 0 || x >= colour.width || y >= colour.height) {
-        distances[r] = distances[r > 0 ? r - 1 : 0];
+        final previous = r > 0 ? r - 1 : 0;
+        reds[r] = reds[previous];
+        greens[r] = greens[previous];
+        blues[r] = blues[previous];
+        distances[r] = distances[previous];
         continue;
       }
 
-      distances[r] = face.distance(colour.getPixel(x, y));
+      final p = colour.getPixel(x, y);
+
+      reds[r] = p.r.toDouble();
+      greens[r] = p.g.toDouble();
+      blues[r] = p.b.toDouble();
+      distances[r] = face.distance(p);
     }
 
-    double bestScore = 0;
-    double? bestRadius;
+    final candidates = <({double radius, double score})>[];
 
     for (var r = _minRadius; r <= limit - _edgeWindow; r++) {
-      var inner = 0.0;
-      var outer = 0.0;
+      var innerR = 0.0, innerG = 0.0, innerB = 0.0;
+      var outerR = 0.0, outerG = 0.0, outerB = 0.0;
+      var outerDistance = 0.0;
 
       for (var k = 1; k <= _edgeWindow; k++) {
-        inner += distances[math.max(0, r - k)];
-        outer += distances[math.min(limit, r + k)];
+        final before = math.max(0, r - k);
+        final after = math.min(limit, r + k);
+
+        innerR += reds[before];
+        innerG += greens[before];
+        innerB += blues[before];
+
+        outerR += reds[after];
+        outerG += greens[after];
+        outerB += blues[after];
+        outerDistance += distances[after];
       }
 
-      inner /= _edgeWindow;
-      outer /= _edgeWindow;
+      innerR /= _edgeWindow;
+      innerG /= _edgeWindow;
+      innerB /= _edgeWindow;
+      outerR /= _edgeWindow;
+      outerG /= _edgeWindow;
+      outerB /= _edgeWindow;
+      outerDistance /= _edgeWindow;
 
-      // How much more "not the face" it looks just outside this radius than
-      // just inside it. Direction matters: the reverse means we are walking
-      // back onto the face, not off it.
-      final step = outer - inner;
-      if (step < _minColourStep) continue;
+      // Whatever is beyond this radius has to already be something other
+      // than the sawn face. That is what keeps growth rings, saw marks and
+      // the pith -- all real colour boundaries, all inside the timber --
+      // from being mistaken for where the log ends.
+      if (outerDistance < _minColourStep) continue;
+
+      final change = math.sqrt(
+        math.pow(outerR - innerR, 2) +
+            math.pow(outerG - innerG, 2) +
+            math.pow(outerB - innerB, 2),
+      );
+
+      if (change < _minEdgeContrast) continue;
 
       final gx = (origin.dx + dx * r).round().clamp(0, gradient.width - 1);
       final gy = (origin.dy + dy * r).round().clamp(0, gradient.height - 1);
@@ -299,15 +357,50 @@ class LogFaceDetector {
       // The gradient corroborates rather than decides. A soft but real
       // colour boundary still counts; a hard gradient with no colour change
       // (a shadow line across the face) does not.
-      final score = step * (0.4 + edgeStrength);
+      candidates.add(
+        (radius: r.toDouble(), score: change * (0.4 + edgeStrength)),
+      );
+    }
 
-      if (score > bestScore) {
-        bestScore = score;
-        bestRadius = r.toDouble();
+    if (candidates.isEmpty) return null;
+
+    // The outermost credible edge, not the strongest one.
+    //
+    // A sawn end goes heartwood, sapwood, bark, background. The strongest
+    // boundary is nearly always sapwood-to-bark, because bark looks nothing
+    // like a sawn face and the luminance step is large -- so picking the
+    // best-scoring candidate stops the outline at the *inner* edge of the
+    // bark and reports a log narrower than it is. Bark is part of the log.
+    //
+    // Bounded by distance rather than by score. Score is the wrong yardstick
+    // on its own: the gradient term makes the sapwood-to-bark step several
+    // times the bark-to-ground one, so any threshold loose enough to admit
+    // the outer edge is also loose enough to admit grass.
+    //
+    // The cap is anchored on the *strongest* boundary rather than the first
+    // one. The first can be an interior feature -- the hard line where a
+    // shadow falls across the face is a genuine colour boundary and often
+    // comes first -- and anchoring there would trap the outline inside the
+    // shadow. The strongest is reliably the log's own edge, so the search
+    // extends outward from there and picks up bark without being able to
+    // reach the scenery.
+    var strongest = candidates.first;
+
+    for (final candidate in candidates) {
+      if (candidate.score > strongest.score) strongest = candidate;
+    }
+
+    final reach = strongest.radius * _maxBarkExtension;
+
+    var chosen = strongest;
+
+    for (final candidate in candidates) {
+      if (candidate.radius > strongest.radius && candidate.radius <= reach) {
+        chosen = candidate;
       }
     }
 
-    return bestRadius;
+    return chosen.radius;
   }
 
   /// Circular 3-tap smoothing, so a single ray cannot leave a tooth in the
