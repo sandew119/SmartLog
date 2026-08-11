@@ -171,12 +171,22 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
 
   String get _subtitle {
     return switch (_stage) {
+      // Distance matters more than anything else the user controls. The
+      // sensor's returns thin out with range, and a scan taken from across
+      // a yard has neither the density nor the precision to fit a circle
+      // to -- so the number it produces looks fine and is not.
       _Stage.aiming =>
-        "Stand 0.7–1.5 m away. The app separates the log from the ground "
-            "and from the logs beside it.",
+        "Stand close — about an arm's length for a small piece, 1–1.5 m for "
+            "a full log. Tap it once; the app separates it from the ground "
+            "and from anything beside it.",
+
+      // Named in the order they are asked for, which is the order that
+      // unblocks the scan fastest.
       _Stage.sweeping =>
-        "The green sleeve is the log being measured. Both end discs turn "
-            "green once that end has actually been seen.",
+        "Take your time — accuracy is worth more than speed here. Point at "
+            "one cut end until its disc turns green, walk the length "
+            "slowly, then the other end, then round the sides.",
+
       _Stage.finishing => "Working out girth, length and volume.",
     };
   }
@@ -235,7 +245,43 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
               left: 16,
               right: 16,
               bottom: 110,
-              child: _CoverageChecklist(coverage: _coverage),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // The size so far, before the checklist. Watching the
+                  // figure settle is what tells the user the app is
+                  // measuring the thing they pointed it at -- and if it has
+                  // locked onto the pallet instead, that shows here during
+                  // the sweep rather than after it.
+                  if (_coverage.liveSize case final size?)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: Colors.greenAccent.withValues(alpha: 0.5),
+                        ),
+                      ),
+                      child: Text(
+                        size,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.greenAccent,
+                          fontSize: 15,
+                          height: 1.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  _CoverageChecklist(coverage: _coverage),
+                ],
+              ),
             ),
 
           Positioned(

@@ -38,7 +38,7 @@ void main() {
 
       expect(coverage.isReady, isFalse);
       expect(coverage.advice, ScanAdvice.showTheFarEnd);
-      expect(coverage.message, contains("far end"));
+      expect(coverage.message, contains("far"));
     });
 
     test('an unseen near end is caught too', () {
@@ -112,6 +112,37 @@ void main() {
       final coverage = ScanCoverage(good(angular: 120, endFillEnd: 0));
 
       expect(coverage.advice, ScanAdvice.showTheFarEnd);
+    });
+  });
+
+  group('the size shown while sweeping', () {
+    test('reads in both systems once there is something to measure', () {
+      final coverage = ScanCoverage(
+        ScanProgress(
+          pointCount: 40000,
+          axisLengthMetres: 3.0,
+          radiusMetres: 0.15,
+          angularCoverageDegrees: 260,
+        ),
+      );
+
+      final size = coverage.liveSize!;
+
+      expect(size, contains("in"));
+      expect(size, contains("cm"));
+      expect(size, contains("across"));
+      expect(size, contains("long"));
+    });
+
+    test('shows nothing rather than a made-up figure', () {
+      // Before there is enough surface to fit to, there is no size. A zero
+      // on screen would read as a measurement of zero.
+      expect(ScanCoverage(const ScanProgress()).liveSize, isNull);
+
+      expect(
+        ScanCoverage(const ScanProgress(axisLengthMetres: 2.0)).liveSize,
+        isNull,
+      );
     });
   });
 

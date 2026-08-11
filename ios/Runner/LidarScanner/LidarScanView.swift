@@ -390,6 +390,13 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
                 "frameCount": stats.frameCount,
                 "extent": Double(stats.extent),
                 "axisLengthMetres": Double(coverage.axisLengthMetres),
+                // The size measured so far, so the user can watch the figure
+                // settle instead of sweeping a grey haze and hoping. It is
+                // not the final measurement -- that is fitted properly in
+                // Dart afterwards -- but it is the same object, and seeing it
+                // is what makes the scan feel like measuring rather than
+                // waiting.
+                "radiusMetres": Double(coverage.radius),
                 "angularCoverageDegrees":
                     Double(coverage.angularCoverageDegrees),
                 "endFillStart": Double(coverage.endFillStart),

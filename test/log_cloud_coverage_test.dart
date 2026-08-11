@@ -313,7 +313,7 @@ void main() {
 
       expect(coverage.isReady, isFalse);
       expect(coverage.advice, ScanAdvice.showTheNearEnd);
-      expect(coverage.message, contains("near end"));
+      expect(coverage.message.toLowerCase(), contains("near"));
     });
 
     test('stopping halfway along is not mistaken for a short log', () {

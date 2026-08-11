@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'unit_display.dart';
+
 /// What the scanner has actually seen so far.
 ///
 /// Raw numbers from the native accumulator, before any judgement is applied.
@@ -28,6 +30,16 @@ class ScanProgress {
   /// Occupancy along the axis, for the coverage bar. Any length.
   final List<int> axialBins;
 
+  /// The object's radius as measured so far, in metres. Zero until there is
+  /// enough surface to fit to.
+  ///
+  /// A running figure, not the final measurement -- that is fitted properly
+  /// once the sweep ends. It is on screen because a scan with no numbers on
+  /// it feels like waiting rather than measuring, and because a reading that
+  /// is obviously wrong is worth seeing *during* the sweep rather than after
+  /// it.
+  final double radiusMetres;
+
   /// ARKit's own view of whether it is tracking properly.
   final bool trackingReliable;
 
@@ -38,6 +50,7 @@ class ScanProgress {
     this.endFillStart = 0,
     this.endFillEnd = 0,
     this.axialBins = const [],
+    this.radiusMetres = 0,
     this.trackingReliable = true,
   });
 
@@ -69,6 +82,7 @@ class ScanProgress {
                 if (b is num) b.toInt()
             ]
           : const [],
+      radiusMetres: number("radiusMetres"),
       trackingReliable: raw["trackingState"] == "normal",
     );
   }
@@ -223,14 +237,15 @@ class ScanCoverage {
   String get message => switch (advice) {
         ScanAdvice.aimAtLog => "Point the camera at the log",
         ScanAdvice.moveCloser =>
-          "Move a little closer and sweep again — the surface is still thin",
-        ScanAdvice.walkTheLength => "Walk along the log, keeping it in view",
+          "Move closer and sweep again, slowly — the surface is still thin",
+        ScanAdvice.walkTheLength =>
+          "Move along it end to end, keeping the whole thing in view",
         ScanAdvice.showTheNearEnd =>
-          "Show the near end of the log — point the camera at the cut face",
+          "Point straight at the near cut face and hold it there a moment",
         ScanAdvice.showTheFarEnd =>
-          "Now the far end — walk down and point at the other cut face",
+          "Now the far cut face — point straight at it and hold",
         ScanAdvice.goRoundTheSides =>
-          "Go round the sides — only part of the way round has been seen",
+          "Walk round it — only part of the way round has been seen",
         ScanAdvice.holdSteady => "Hold steady — the camera has lost its place",
         ScanAdvice.readyToFinish =>
           "The whole log has been covered. Tap Finish when you're ready.",
@@ -265,6 +280,27 @@ class ScanCoverage {
               "of ${(requiredPoints / 1000).toStringAsFixed(0)}k",
         ),
       ];
+
+  /// The size measured so far, in the units the user works in, or null
+  /// until there is enough surface to say anything.
+  ///
+  /// Deliberately shown while sweeping. A scanner that displays nothing but
+  /// a progress bar gives the user no way to tell that it has locked onto
+  /// the pallet instead of the log until the very end, and no sense that
+  /// the thing in their hands is measuring at all.
+  String? get liveSize {
+    if (progress.radiusMetres <= 0 || progress.axisLengthMetres <= 0) {
+      return null;
+    }
+
+    final diameterInches =
+        progress.radiusMetres * 2 / UnitDisplay.centimetresPerInch * 100;
+
+    final lengthFeet = progress.axisLengthMetres / UnitDisplay.metresPerFoot;
+
+    return "${UnitDisplay.across(diameterInches)}   across\n"
+        "${UnitDisplay.length(lengthFeet)}   long";
+  }
 
   /// Per-section coverage, 0..1, for a bar showing where the thin spots are.
   ///
