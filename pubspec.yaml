@@ -32,6 +32,8 @@ dependencies:
   cloud_firestore: ^5.6.12
   google_sign_in: ^7.2.0
   intl: ^0.19.0
+  image_picker: ^1.2.3
+  tflite_flutter: ^0.12.1
 
 dev_dependencies:
   flutter_test:
@@ -65,3 +67,13 @@ flutter:
 
   assets:
     - assets/images/
+    # The defect model. The labels file is committed; the .tflite is not,
+    # because a 100 MB binary does not belong in git history -- it is copied
+    # in beside the labels before building.
+    #
+    # Listed as an explicit file rather than as the `assets/models/`
+    # directory: directory expansion left the .tflite out of the bundle
+    # while picking up the labels beside it, and a model that silently is
+    # not there looks exactly like a model that found nothing.
+    - assets/models/wood_defect_labels.txt
+    - assets/models/wood_defect.tflite

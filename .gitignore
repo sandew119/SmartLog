@@ -48,3 +48,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# The trained model itself. ~50MB of binary that changes wholesale on
+# every retrain, so it is distributed alongside the repo rather than in it.
+assets/models/*.tflite

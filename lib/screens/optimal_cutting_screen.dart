@@ -11,6 +11,7 @@ import '../services/lidar_service.dart';
 import '../services/sawing_engine.dart';
 import '../services/user_preferences_service.dart';
 import '../widgets/cutting_setup_sheet.dart';
+import '../widgets/image_source_sheet.dart';
 import 'cutting_result_screen.dart';
 import 'lidar_measurement_screen.dart';
 import 'log_face_trace_screen.dart';
@@ -129,6 +130,26 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
       _capturedImage = image;
       _imageCaptured = true;
     });
+  }
+
+  /// Takes a photo the user already has and goes straight to tracing.
+  Future<void> _chooseFromGallery() async {
+    final file = await pickImage(
+      context,
+      title: "Photo of the log face",
+      cameraHint: "Point the camera at the cut end",
+      galleryHint: "Pick a photo of the cut end you already took",
+    );
+
+    if (file == null || !mounted) return;
+
+    setState(() {
+      _capturedImage = XFile(file.path);
+      _imageCaptured = true;
+    });
+
+    final traced = await _traceFace(file);
+    if (traced && mounted) await _plan();
   }
 
   void _retake() {
@@ -307,7 +328,12 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
         centerTitle: true,
         title: const Text("Optimal Cutting"),
       ),
+      // StackFit.expand, so the scroll view inside gets a bounded height and
+      // actually scrolls. Under the default loose constraints it sizes to
+      // its own content instead, and anything past the bottom of the screen
+      // becomes unreachable rather than scrollable.
       body: Stack(
+        fit: StackFit.expand,
         children: [
           SafeArea(
             child: _stage == _Stage.modeSelect
@@ -553,11 +579,20 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
                   ),
           ),
           const SizedBox(height: 10),
-          if (!_imageCaptured)
+          if (!_imageCaptured) ...[
+            // A log photographed earlier is just as good as one taken now,
+            // and the measuring often happens back at a desk rather than in
+            // the yard.
+            TextButton.icon(
+              onPressed: _chooseFromGallery,
+              icon: const Icon(Icons.photo_library, size: 18),
+              label: const Text("Choose a photo from this phone"),
+            ),
             TextButton(
               onPressed: () => _plan(),
               child: const Text("Skip photo, enter manually"),
             ),
+          ],
         ],
       ),
     );

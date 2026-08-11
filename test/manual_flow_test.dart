@@ -28,6 +28,17 @@ void main() {
     // exactly why nothing below may use pumpAndSettle.
     await pumpUntilFound(tester, find.text("Skip photo, enter manually"));
 
+    // The camera view now also offers a gallery photo, which pushes this
+    // button below the fold on a short viewport. An explicit drag rather
+    // than dragUntilVisible: a SingleChildScrollView builds all of its
+    // children, so the finder matches while the button is still off-screen
+    // and that helper would stop before scrolling anything.
+    await tester.drag(
+      find.byType(SingleChildScrollView),
+      const Offset(0, -200),
+    );
+    await tester.pump();
+
     await tester.tap(find.text("Skip photo, enter manually"));
     await pumpUntilFound(tester, find.text("How should this log be cut?"));
   }
