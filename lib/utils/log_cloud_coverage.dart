@@ -22,15 +22,62 @@ import 'scan_coverage.dart';
 class LogCloudCoverage {
   const LogCloudCoverage._();
 
-  /// Sections along the log. Matches the native `binCount`.
-  static const int binCount = 48;
+  /// Sections along the log, and sectors around it, when the cloud is dense
+  /// enough to support them. Matches the native constants.
+  static const int maxBinCount = 48;
+  static const int maxSectorCount = 36;
 
-  /// Sectors around the trunk, 10 degrees each.
-  static const int sectorCount = 36;
+  /// The coarsest the analysis will go before giving up.
+  ///
+  /// Below these there is no longer enough resolution for "have I been all
+  /// the way round" to mean anything.
+  static const int minBinCount = 6;
+  static const int minSectorCount = 8;
+
+  /// Sections along the log, chosen from how many points there are.
+  ///
+  /// Fixed at 48, this was an assumption about density dressed up as a
+  /// constant. A section is only judged at all once it holds a sector's
+  /// worth of points, so on a sparse cloud every section falls below that,
+  /// no section is judged, and angular coverage comes back as zero however
+  /// carefully the user walked round. A 10 cm object can yield at most ~300
+  /// points -- 6 per section -- so it could never have finished a scan.
+  ///
+  /// Coarsening is not a lowered standard. The user still has to have been
+  /// all the way round and still has to have shown both ends; those facts
+  /// are simply judged at a resolution the points can actually support.
+  static int binsFor(int pointCount) {
+    final affordable =
+        pointCount ~/ (minSectorCount * pointsPerSectorFor(pointCount) * 2);
+
+    return affordable.clamp(minBinCount, maxBinCount);
+  }
+
+  /// Sectors around the trunk, chosen from how many points a section holds.
+  static int sectorsFor(int pointsInSection, int totalPoints) {
+    final affordable =
+        pointsInSection ~/ (pointsPerSectorFor(totalPoints) * 2);
+
+    return affordable.clamp(minSectorCount, maxSectorCount);
+  }
 
   /// A sector counts as seen once this many points fall in it, so one stray
   /// depth return cannot claim a whole sector was covered.
   static const int minPointsPerSector = 3;
+
+  /// Below this many points the whole cloud is sparse enough that three per
+  /// sector is a larger share of it than the rule was ever meant to demand.
+  static const int sparseCloudThreshold = 2000;
+
+  /// Points a sector needs before it counts as seen.
+  ///
+  /// Three on any normal scan. Two when the cloud is sparse, because the
+  /// rule exists to stop a single stray return claiming a sector, and two
+  /// already does that -- while three, on an object returning twenty points
+  /// around its whole circumference, rejects sectors the sensor genuinely
+  /// saw and reports a full sweep as half of one.
+  static int pointsPerSectorFor(int totalPoints) =>
+      totalPoints < sparseCloudThreshold ? 2 : minPointsPerSector;
 
   static ScanProgress analyse(List<Vector3> points) {
     if (points.length < 100) return const ScanProgress();
@@ -72,6 +119,8 @@ class LogCloudCoverage {
 
     // --- bin along the axis -------------------------------------------
 
+    final binCount = binsFor(points.length);
+
     final bins = List.generate(binCount, (_) => <int>[]);
 
     for (var i = 0; i < points.length; i++) {
@@ -92,6 +141,8 @@ class LogCloudCoverage {
 
     for (var bin = skip; bin < binCount - skip; bin++) {
       final indices = bins[bin];
+
+      final sectorCount = sectorsFor(indices.length, points.length);
       if (indices.length < sectorCount) continue;
 
       // Angles are measured about this section's own fitted centre, not the
@@ -121,7 +172,8 @@ class LogCloudCoverage {
         sectors[(normalised * sectorCount).floor()]++;
       }
 
-      final seen = sectors.where((c) => c >= minPointsPerSector).length;
+      final seen =
+          sectors.where((c) => c >= pointsPerSectorFor(points.length)).length;
 
       worstAngular = math.min(worstAngular, seen * (360 / sectorCount));
       sawAnySection = true;
@@ -134,8 +186,35 @@ class LogCloudCoverage {
       endFillStart: fill(bins.first, radii, angles),
       endFillEnd: fill(bins.last, radii, angles),
       axialBins: [for (final b in bins) b.length],
+      radiusMetres: _medianInteriorRadius(bins, radii, skip),
       trackingReliable: true,
     );
+  }
+
+  /// A representative radius: the median over interior sections.
+  ///
+  /// Robust to the end faces, whose points run in towards the axis, and to a
+  /// stray return beyond the surface. Mirrors what the native analyser
+  /// reports, and is what sizes the point requirement -- an object can only
+  /// yield as many points as its surface has room for.
+  static double _medianInteriorRadius(
+    List<List<int>> bins,
+    List<double> radii,
+    int skip,
+  ) {
+    final interior = <double>[];
+
+    for (var bin = skip; bin < bins.length - skip; bin++) {
+      for (final i in bins[bin]) {
+        interior.add(radii[i]);
+      }
+    }
+
+    if (interior.isEmpty) return 0;
+
+    interior.sort();
+
+    return interior[interior.length ~/ 2];
   }
 
   /// Radial rings and sectors the inner disc is divided into when judging
@@ -185,18 +264,39 @@ class LogCloudCoverage {
     if (outer <= 0) return 0;
 
     final limit = outer * 0.5;
-    final cells = List<int>.filled(fillRings * fillSectors, 0);
 
-    for (final i in indices) {
-      if (radii[i] >= limit) continue;
+    final inner = [for (final i in indices) if (radii[i] < limit) i];
 
-      final ring =
-          ((radii[i] / limit) * fillRings).floor().clamp(0, fillRings - 1);
+    // The grid is sized to the points there are to put in it.
+    //
+    // Fixed at 3 rings by 12 sectors, the disc needed 108 points before it
+    // could read as full at all -- more than a small object's whole end face
+    // returns. It therefore read empty however squarely the user pointed at
+    // it, and the scan could never finish. Coarser cells still separate the
+    // two cases the measure exists to separate: a sawn face fills whatever
+    // grid it is given, and a hollow ring fills none of it.
+    // Sized from the whole section, never from the inner points alone.
+    //
+    // Sizing it from the inner points is self-fulfilling: a handful of stray
+    // returns then gets a grid coarse enough for a handful to fill, and
+    // reads as a sawn face. Sizing it from how much surface the section
+    // holds asks the right question -- is the middle of this disc as
+    // populated as the section around it -- and noise cannot pass it.
+    final cellBudget = (indices.length ~/ (minPointsPerFillCell * 6))
+        .clamp(4, fillRings * fillSectors);
+
+    final rings = cellBudget <= 8 ? 1 : (cellBudget <= 18 ? 2 : fillRings);
+    final sectors = math.max(4, cellBudget ~/ rings);
+
+    final cells = List<int>.filled(rings * sectors, 0);
+
+    for (final i in inner) {
+      final ring = ((radii[i] / limit) * rings).floor().clamp(0, rings - 1);
 
       final normalised = (angles[i] / (2 * math.pi) + 0.5).clamp(0.0, 0.9999);
-      final sector = (normalised * fillSectors).floor();
+      final sector = (normalised * sectors).floor();
 
-      cells[ring * fillSectors + sector]++;
+      cells[ring * sectors + sector]++;
     }
 
     final occupied = cells.where((c) => c >= minPointsPerFillCell).length;

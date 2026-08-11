@@ -56,17 +56,59 @@ struct ScanCoverageAnalyser {
         )
     }
 
-    /// Sections along the log. About 6 cm each on a 3 m log -- fine enough
-    /// to show a gap the user should go back and fill, coarse enough that a
-    /// section still holds enough points to judge.
-    static let binCount = 48
+    /// Sections along the log and sectors around it, when the cloud is dense
+    /// enough to support them.
+    static let maxBinCount = 48
+    static let maxSectorCount = 36
 
-    /// Sectors around the trunk, 10 degrees each.
-    static let sectorCount = 36
+    /// The coarsest the analysis will go. Below these, "have I been all the
+    /// way round" stops meaning anything.
+    static let minBinCount = 6
+    static let minSectorCount = 8
 
     /// A sector counts as seen once this many points fall in it, so a single
     /// stray depth return cannot claim a whole sector was covered.
     static let minPointsPerSector = 3
+
+    /// Below this the cloud is sparse enough that three per sector is a
+    /// bigger share of it than the rule ever meant to demand.
+    static let sparseCloudThreshold = 2000
+
+    /// Points a sector needs before it counts as seen.
+    ///
+    /// Two on a sparse cloud: the rule exists to stop one stray return
+    /// claiming a sector, and two already does that, while three on an
+    /// object returning twenty points around its whole circumference
+    /// rejects sectors the sensor genuinely saw.
+    static func pointsPerSector(totalPoints: Int) -> Int {
+        totalPoints < sparseCloudThreshold ? 2 : minPointsPerSector
+    }
+
+    /// Sections along the log, chosen from how many points there are.
+    ///
+    /// Fixed at 48, this was an assumption about density dressed up as a
+    /// constant. A section is only judged once it holds a sector's worth of
+    /// points, so on a sparse cloud no section is judged at all and angular
+    /// coverage comes back zero however carefully the user walked round. A
+    /// 10 cm object yields at most ~300 points -- six per section -- and so
+    /// could never have finished a scan.
+    ///
+    /// Mirrors `LogCloudCoverage` in Dart, which is where this is tested.
+    /// Keep the two in step.
+    static func bins(forPointCount count: Int) -> Int {
+        let affordable =
+            count / (minSectorCount * pointsPerSector(totalPoints: count) * 2)
+
+        return min(maxBinCount, max(minBinCount, affordable))
+    }
+
+    /// Sectors around the trunk, chosen from how many points a section holds.
+    static func sectors(inSection sectionCount: Int, totalPoints: Int) -> Int {
+        let affordable =
+            sectionCount / (pointsPerSector(totalPoints: totalPoints) * 2)
+
+        return min(maxSectorCount, max(minSectorCount, affordable))
+    }
 
     /// Radial rings and sectors the inner disc is divided into when judging
     /// whether a cross-section is a sawn face.
@@ -123,6 +165,7 @@ struct ScanCoverageAnalyser {
 
         // --- bin along the axis ------------------------------------------
 
+        let binCount = bins(forPointCount: points.count)
         var binPoints = [[Int]](repeating: [], count: binCount)
 
         for i in 0..<points.count {
@@ -144,6 +187,10 @@ struct ScanCoverageAnalyser {
 
         for bin in skip..<(binCount - skip) {
             let indices = binPoints[bin]
+
+            let sectorCount = sectors(
+                inSection: indices.count, totalPoints: points.count
+            )
             guard indices.count >= sectorCount else { continue }
 
             // Angles are measured about this section's own fitted centre,
@@ -177,7 +224,8 @@ struct ScanCoverageAnalyser {
                 sectorCounts[sector] += 1
             }
 
-            let seen = sectorCounts.filter { $0 >= minPointsPerSector }.count
+            let required = pointsPerSector(totalPoints: points.count)
+            let seen = sectorCounts.filter { $0 >= required }.count
             let degrees = Float(seen) * (360 / Float(sectorCount))
 
             worstAngular = min(worstAngular, degrees)
@@ -249,20 +297,40 @@ struct ScanCoverageAnalyser {
         guard outer > 0 else { return 0 }
 
         let limit = outer * 0.5
-        var cells = [Int](repeating: 0, count: fillRings * fillSectors)
+
+        // The grid is sized to the points there are to put in it.
+        //
+        // Fixed at 3 rings by 12 sectors, the disc needed 108 points before
+        // it could read as full at all -- more than a small object's whole
+        // end face returns -- so it read empty however squarely the user
+        // pointed at it and the scan could never finish.
+        //
+        // Sized from the whole section, never from the inner points alone.
+        // Sizing it from the inner points is self-fulfilling: a handful of
+        // stray returns would then get a grid coarse enough for a handful to
+        // fill, and read as a sawn face.
+        let cellBudget = min(
+            fillRings * fillSectors,
+            max(4, indices.count / (minPointsPerFillCell * 6))
+        )
+
+        let rings = cellBudget <= 8 ? 1 : (cellBudget <= 18 ? 2 : fillRings)
+        let sectors = max(4, cellBudget / rings)
+
+        var cells = [Int](repeating: 0, count: rings * sectors)
 
         for i in indices where radii[i] < limit {
             let ring = min(
-                fillRings - 1,
-                max(0, Int((radii[i] / limit) * Float(fillRings)))
+                rings - 1,
+                max(0, Int((radii[i] / limit) * Float(rings)))
             )
 
             var normalised = angles[i] / (2 * Float.pi) + 0.5
             normalised = min(max(normalised, 0), 0.999_9)
 
-            let sector = Int(normalised * Float(fillSectors))
+            let sector = Int(normalised * Float(sectors))
 
-            cells[ring * fillSectors + sector] += 1
+            cells[ring * sectors + sector] += 1
         }
 
         let occupied = cells.filter { $0 >= minPointsPerFillCell }.count

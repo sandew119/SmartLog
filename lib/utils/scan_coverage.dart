@@ -135,17 +135,57 @@ class ScanCoverage {
   /// between a floor that guarantees every section has points to fit and the
   /// original figure, so a full-size log is asked for exactly what it always
   /// was.
-  static int requiredPointsFor(double lengthMetres) {
+  /// Voxel edge the depth accumulator bins returns into, in metres.
+  ///
+  /// Must match `DepthAccumulator.defaultVoxelSize`. It is the hard ceiling
+  /// on how many distinct points an object can ever yield: the accumulator
+  /// keeps one averaged point per occupied voxel, so a surface can produce
+  /// its own area divided by this squared, and not one point more however
+  /// long the user sweeps.
+  static const double voxelSizeMetres = 0.008;
+
+  /// Share of an object's surface a good sweep actually returns.
+  ///
+  /// Never all of it -- the underside rests on the ground, and grazing
+  /// angles return nothing. Set so a 3 m log is asked for the 25 000 points
+  /// that figure was originally chosen as.
+  static const double observableFraction = 0.45;
+
+  static int requiredPointsFor(double lengthMetres, {double radiusMetres = 0}) {
     if (!lengthMetres.isFinite || lengthMetres <= 0) return minPointFloor;
+
+    // From the surface there is to cover, wherever the radius is known.
+    //
+    // Scaling on length alone is still an assumption about girth, and it is
+    // the assumption that made small objects unmeasurable: a 10 cm cylinder
+    // has 0.02 m2 of surface, which at an 8 mm voxel is at most 307 points
+    // in total. Asked for 6 000, it could sweep for an hour and never
+    // finish -- not because the sweep was poor, but because the points do
+    // not exist.
+    if (radiusMetres.isFinite && radiusMetres > 0) {
+      final area =
+          2 * math.pi * radiusMetres * (lengthMetres + radiusMetres);
+
+      final available = area / (voxelSizeMetres * voxelSizeMetres);
+
+      return (available * observableFraction)
+          .clamp(minPointFloor.toDouble(), maxPointRequirement.toDouble())
+          .round();
+    }
 
     return (lengthMetres * pointsPerMetre)
         .clamp(minPointFloor.toDouble(), maxPointRequirement.toDouble())
         .round();
   }
 
-  /// Enough that each of the 48 axial sections can hold points in most of
-  /// its 36 sectors -- the density the coverage measure itself needs.
-  static const int minPointFloor = 6000;
+  /// The fewest points any object is asked for.
+  ///
+  /// Low, because for a small object it is not a standard being upheld but
+  /// a physical ceiling being respected. What keeps a sparse scan honest is
+  /// that the coverage measures below coarsen with it -- the girth and the
+  /// end faces still have to be *seen*, just judged at a resolution the
+  /// points can support.
+  static const int minPointFloor = 120;
 
   /// Chosen so a 3 m log -- the size the old fixed requirement was written
   /// for -- lands on that requirement exactly, and everything shorter is
@@ -171,7 +211,10 @@ class ScanCoverage {
 
   /// Points this particular object needs before its surface is well enough
   /// sampled to fit circles to.
-  int get requiredPoints => requiredPointsFor(progress.axisLengthMetres);
+  int get requiredPoints => requiredPointsFor(
+        progress.axisLengthMetres,
+        radiusMetres: progress.radiusMetres,
+      );
 
   bool get hasEnoughPoints => progress.pointCount >= requiredPoints;
 

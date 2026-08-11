@@ -286,6 +286,67 @@ void main() {
     });
   });
 
+  group('an object small enough to hold in one hand', () {
+    /// A 10 cm cylinder sampled the way the accumulator actually returns it:
+    /// one point per 8 mm voxel. That is not a choice, it is the ceiling --
+    /// 0.02 m2 of surface divided by a 64 mm2 voxel is about 300 points, and
+    /// no length of sweep produces a single one more.
+    List<Vector3> smallCylinder({bool capped = true}) {
+      const radius = 0.025;
+      const length = 0.10;
+      const voxel = 0.008;
+
+      return logCloud(
+        radius: radius,
+        length: length,
+        rings: (length / voxel).round(),
+        perRing: (2 * math.pi * radius / voxel).round(),
+        capStart: capped,
+        capEnd: capped,
+        capPoints: 120,
+      );
+    }
+
+    test('a fully swept 10 cm cylinder can finish', () {
+      // It could not before, and not because the sweep was poor. Three
+      // separate gates were fixed counts calibrated for a cloud of tens of
+      // thousands: it was asked for 6 000 points when 300 exist, its
+      // sections never held the 36 needed to judge girth so coverage read 0
+      // degrees for ever, and its end face never held the 108 needed to read
+      // as filled. All three were unreachable, so Finish stayed dead.
+      final coverage = ScanCoverage(LogCloudCoverage.analyse(smallCylinder()));
+
+      expect(
+        coverage.isReady,
+        isTrue,
+        reason: "still blocked on: ${coverage.message}",
+      );
+    });
+
+    test('and an unswept one still cannot', () {
+      // The standard has to survive the coarsening. A small object with its
+      // ends never shown must still be refused, or all that has happened is
+      // that the gate was removed.
+      final coverage =
+          ScanCoverage(LogCloudCoverage.analyse(smallCylinder(capped: false)));
+
+      expect(coverage.isReady, isFalse);
+      expect(coverage.advice, ScanAdvice.showTheNearEnd);
+    });
+
+    test('the points it is asked for are points that can exist', () {
+      // 0.02 m2 of surface at an 8 mm voxel is ~307 points in total. Asking
+      // for more than that is asking for a scan that cannot be completed.
+      final progress = LogCloudCoverage.analyse(smallCylinder());
+
+      expect(
+        ScanCoverage(progress).requiredPoints,
+        lessThan(307),
+        reason: "asked for more points than the object can physically yield",
+      );
+    });
+  });
+
   group('the whole decision, end to end', () {
     test('a properly swept log enables Finish', () {
       // Denser than the other clouds here: this is the one test that has to
