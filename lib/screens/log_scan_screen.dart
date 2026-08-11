@@ -7,6 +7,7 @@ import '../services/measurement_source.dart';
 import '../services/user_preferences_service.dart';
 import '../utils/log_volume_pipeline.dart';
 import '../utils/timber_volume.dart';
+import '../utils/unit_display.dart';
 import '../widgets/choose_stack_sheet.dart';
 import '../widgets/manual_measurement_sheet.dart';
 import 'stack_detail_screen.dart';
@@ -439,30 +440,53 @@ class _LogScanScreenState extends State<LogScanScreen> {
             const SizedBox(height: 12),
             _statRow("Girth (thinnest)", measurement.girthDisplay),
             _statRow(
-              "Length",
-              "${measurement.lengthFeet.toStringAsFixed(2)} ft",
+              "Diameter",
+              UnitDisplay.across(measurement.minDiameterInches),
             ),
+            _statRow("Length", UnitDisplay.length(measurement.lengthFeet)),
             if (deduction > 0)
               _statRow(
                 "After deduction",
-                "${effectiveGirthInches(measuredInches: measurement.minGirthInches, deductionInches: deduction).toStringAsFixed(1)} in "
-                    "(−${deduction.toStringAsFixed(1)} in)",
+                "${UnitDisplay.across(effectiveGirthInches(measuredInches: measurement.minGirthInches, deductionInches: deduction))}"
+                    "  (−${deduction.toStringAsFixed(1)} in)",
               ),
             const Divider(height: 20),
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
                   "Volume",
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
                 const Spacer(),
-                Text(
-                  prefs.volumeMethod == VolumeMethod.referenceTable
-                      ? volume.display
-                      : "${volume.cubicFeetDecimal.toStringAsFixed(3)} ft³",
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        UnitDisplay.volume(volume.cubicFeetDecimal),
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      // The book reading, spelled out. An angal is a twelfth
+                      // of a cubic foot, not a cubic inch -- the two get
+                      // confused constantly and differ by 144x, so they are
+                      // never shown sharing a word.
+                      if (prefs.volumeMethod == VolumeMethod.referenceTable)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            UnitDisplay.adiAngal(volume.adi, volume.angal),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context).hintColor,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ],

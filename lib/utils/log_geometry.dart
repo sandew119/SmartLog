@@ -400,9 +400,17 @@ class LogGeometry {
   ///
   /// Returns null for a cloud with no clear long direction, which is the
   /// honest answer for a blob that is not log-shaped.
+  /// [minAspectRatio] is what makes something log-shaped: longer than it is
+  /// thick. That is the property actually being tested, and unlike a
+  /// minimum length it holds at any size.
+  ///
+  /// This used to demand 20 cm of length outright, which quietly refused to
+  /// measure anything smaller than a forearm -- a 15 cm sample came back as
+  /// no reading at all, with nothing on screen to say why.
   static ({Vector3 start, Vector3 end})? principalExtent(
     List<Vector3> points, {
-    double minLengthMetres = 0.20,
+    double minLengthMetres = 0.05,
+    double minAspectRatio = 1.4,
   }) {
     if (points.length < 12) return null;
 
@@ -444,7 +452,23 @@ class LogGeometry {
     }
 
     if (!min.isFinite || !max.isFinite) return null;
-    if (max - min < minLengthMetres) return null;
+
+    final length = max - min;
+
+    // A floor the sensor itself imposes: below a few centimetres there are
+    // not enough distinct depth returns across the object to fit anything.
+    if (length < minLengthMetres) return null;
+
+    // And the shape test. A high percentile rather than the maximum, so one
+    // stray return off the side cannot make a log look like a ball.
+    final offsets = <double>[
+      for (final p in points) (p - mean - direction * (p - mean).dot(direction)).length,
+    ]..sort();
+
+    final width =
+        2 * offsets[(offsets.length * 0.9).floor().clamp(0, offsets.length - 1)];
+
+    if (width > 0 && length < width * minAspectRatio) return null;
 
     return (
       start: mean + direction * min,
@@ -482,6 +506,7 @@ class LogGeometry {
     double slabThicknessMetres = 0.02,
     int refinementIterations = 3,
     double inlierToleranceMetres = 0.01,
+    double? seedRadiusMetres,
     int? seed,
   }) {
     if (cloud.length < 12) return null;
@@ -502,6 +527,7 @@ class LogGeometry {
         length,
         slabThicknessMetres: slabThicknessMetres,
         inlierToleranceMetres: inlierToleranceMetres,
+        seedRadiusMetres: seedRadiusMetres,
         seed: seed,
       );
 
@@ -597,6 +623,7 @@ class LogGeometry {
     double length, {
     required double slabThicknessMetres,
     required double inlierToleranceMetres,
+    double? seedRadiusMetres,
     int? seed,
   }) {
     final basis = _perpendicularBasis(axis.direction);
@@ -629,7 +656,16 @@ class LogGeometry {
     final accepted = <CrossSection>[];
     final rejected = <CrossSection>[];
 
-    double? runningRadius;
+    // Seeded from a previous pass where one is available, so the radial gate
+    // below is armed for the very first slab.
+    //
+    // Left to build itself up, the gate can only start working after a slab
+    // has been accepted -- and if that first slab is the contaminated one,
+    // the running radius starts out enormous and the gate never bites. That
+    // is precisely the case of a small object resting on a table: the fill
+    // reaches across the contact line, the first section fits a circle
+    // through the tabletop, and every slab after it inherits the excuse.
+    double? runningRadius = seedRadiusMetres;
 
     for (var i = 0; i < slabCount; i++) {
       var points = buckets[i];

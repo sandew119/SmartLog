@@ -112,21 +112,54 @@ class ScanCoverage {
   /// error squares into volume error.
   static const double minAngularCoverageDegrees = 200;
 
-  /// Enough surface for the per-section circle fits to average noise out.
-  static const int minPointCount = 25000;
-
-  /// Shorter than this and the sweep has almost certainly locked onto
-  /// something that is not a log.
+  /// Enough surface for the per-section circle fits to average noise out,
+  /// on an object of a given length.
   ///
-  /// The old floor was 0.5 m, which any sizeable object clears -- so "have I
-  /// seen the whole log" was never really being asked.
-  static const double minPlausibleLengthMetres = 1.0;
+  /// Scaled rather than fixed. A flat 25 000 is right for a 3 m trunk and
+  /// impossible for a 20 cm sample: the requirement is really "enough points
+  /// to cover the surface", and a short object simply has less surface. Held
+  /// between a floor that guarantees every section has points to fit and the
+  /// original figure, so a full-size log is asked for exactly what it always
+  /// was.
+  static int requiredPointsFor(double lengthMetres) {
+    if (!lengthMetres.isFinite || lengthMetres <= 0) return minPointFloor;
+
+    return (lengthMetres * pointsPerMetre)
+        .clamp(minPointFloor.toDouble(), maxPointRequirement.toDouble())
+        .round();
+  }
+
+  /// Enough that each of the 48 axial sections can hold points in most of
+  /// its 36 sectors -- the density the coverage measure itself needs.
+  static const int minPointFloor = 6000;
+
+  /// Chosen so a 3 m log -- the size the old fixed requirement was written
+  /// for -- lands on that requirement exactly, and everything shorter is
+  /// asked for a proportionate share of it.
+  static const int pointsPerMetre = 8500;
+
+  /// What a full-size log has always been asked for.
+  static const int maxPointRequirement = 25000;
+
+  /// Shorter than this and there is not enough object for the sensor to
+  /// resolve at all.
+  ///
+  /// This is a sensor limit, not a statement about logs. It used to be 1.0 m,
+  /// which meant anything smaller than a metre could never finish a scan --
+  /// the Finish button stayed dead for ever with no way for the user to
+  /// discover why. Whether the thing being measured is log-shaped is decided
+  /// by its proportions during the fit, which is the honest place for it.
+  static const double minPlausibleLengthMetres = 0.10;
 
   const ScanCoverage(this.progress);
 
   final ScanProgress progress;
 
-  bool get hasEnoughPoints => progress.pointCount >= minPointCount;
+  /// Points this particular object needs before its surface is well enough
+  /// sampled to fit circles to.
+  int get requiredPoints => requiredPointsFor(progress.axisLengthMetres);
+
+  bool get hasEnoughPoints => progress.pointCount >= requiredPoints;
 
   bool get isPlausibleLength =>
       progress.axisLengthMetres >= minPlausibleLengthMetres;
@@ -155,7 +188,7 @@ class ScanCoverage {
     if (progress.pointCount == 0) return 0;
 
     final parts = <double>[
-      progress.pointCount / minPointCount,
+      progress.pointCount / requiredPoints,
       progress.axisLengthMetres / minPlausibleLengthMetres,
       progress.angularCoverageDegrees / minAngularCoverageDegrees,
       progress.endFillStart / endFillThreshold,
@@ -228,7 +261,8 @@ class ScanCoverage {
         (
           label: "Surface detail",
           done: hasEnoughPoints,
-          detail: "${(progress.pointCount / 1000).toStringAsFixed(0)}k points",
+          detail: "${(progress.pointCount / 1000).toStringAsFixed(1)}k "
+              "of ${(requiredPoints / 1000).toStringAsFixed(0)}k",
         ),
       ];
 

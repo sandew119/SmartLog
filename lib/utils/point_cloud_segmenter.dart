@@ -368,6 +368,7 @@ class PointCloudSegmenter {
     double groundToleranceMetres = defaultGroundToleranceMetres,
     double connectionRadiusMetres = defaultConnectionRadiusMetres,
     double minGroundFraction = defaultMinGroundFraction,
+    double minGroundExtentMetres = defaultMinGroundExtentMetres,
     int? seedValue,
   }) {
     if (cloud.isEmpty) {
@@ -383,6 +384,7 @@ class PointCloudSegmenter {
       up: up,
       toleranceMetres: groundToleranceMetres,
       minInlierFraction: minGroundFraction,
+      minExtentMetres: minGroundExtentMetres,
       seed: seedValue,
     );
 

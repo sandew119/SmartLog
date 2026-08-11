@@ -57,11 +57,36 @@ void main() {
       expect(coverage.advice, ScanAdvice.goRoundTheSides);
     });
 
-    test('half a metre is not a log', () {
-      // The old floor was 0.5 m, which any sizeable object clears -- so the
-      // question "have I seen the whole log" was never really asked.
-      expect(ScanCoverage(good(length: 0.5)).isReady, isFalse);
-      expect(ScanCoverage(good(length: 0.5)).advice, ScanAdvice.walkTheLength);
+    test('a short object can still be finished', () {
+      // The floor was 1.0 m, so nothing shorter could ever finish a scan:
+      // the Finish button stayed dead however carefully the user swept, and
+      // nothing on screen explained why. Whether the scan is trustworthy is
+      // decided by what has been *seen* -- both ends, enough of the way
+      // round, enough surface -- not by the object clearing a size the code
+      // privately expects.
+      expect(ScanCoverage(good(length: 0.5)).isReady, isTrue);
+      expect(ScanCoverage(good(length: 0.2)).isReady, isTrue);
+    });
+
+    test('something too small for the sensor is still refused', () {
+      expect(ScanCoverage(good(length: 0.03)).isReady, isFalse);
+      expect(ScanCoverage(good(length: 0.03)).advice, ScanAdvice.walkTheLength);
+    });
+
+    test('a short object is not asked for a full log worth of points', () {
+      // The point requirement scales with the surface there is to cover.
+      // Held to a flat 25 000, a 20 cm sample can be swept perfectly and
+      // still be told to move closer, for ever.
+      expect(
+        ScanCoverage.requiredPointsFor(0.2),
+        lessThan(ScanCoverage.requiredPointsFor(3.0)),
+      );
+
+      expect(
+        ScanCoverage.requiredPointsFor(3.0),
+        ScanCoverage.maxPointRequirement,
+        reason: "a full-size log must be asked for exactly what it always was",
+      );
     });
 
     test('lost tracking outranks every other instruction', () {

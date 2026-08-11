@@ -6,6 +6,7 @@ import '../models/log_measurement.dart';
 import '../screens/lidar_capture_screen.dart';
 import '../utils/log_geometry.dart';
 import '../utils/log_volume_pipeline.dart';
+import '../utils/measurement_scale.dart';
 import '../utils/point_cloud_segmenter.dart';
 import 'lidar_scanner_service.dart';
 import 'measurement_source.dart';
@@ -76,39 +77,49 @@ class LidarMeasurementSource implements MeasurementSource {
   static LogMeasurement? measurementFrom(PointCloudCapture capture) {
     if (capture.taps.isEmpty) return null;
 
-    // One tap picks the log; the ground it rests on and the logs beside it
-    // are separated out before any circle is fitted. Feeding the raw cloud
-    // straight to buildProfile is what made scans read wrong: ground points
-    // sit inside a slab as a flat sheet and drag the fitted radius out.
-    final segmented = PointCloudSegmenter.segment(
+    // Tolerances come from the scene, not from an assumption about how big
+    // the thing in front of the camera is.
+    //
+    // Everything below used to run at distances chosen for a log about 30 cm
+    // thick: an 8 cm flood-fill radius, a 1 cm circle-fit tolerance, 2 cm
+    // slabs. On a log those are sensible. On a small cylinder the flood fill
+    // steps clean off the object onto whatever it is resting on, and the
+    // circle fit admits a third of the object's own radius as inlier slack,
+    // so what comes back is a confident measurement of the table.
+    final scale = MeasurementScale.fromCloud(
       capture.points,
-      capture.taps.first,
+      near: capture.taps.first,
     );
 
-    final List<Vector3> cloud;
-    final Vector3 start;
-    final Vector3 end;
-
-    if (segmented.points.length >= 24) {
-      final extent = LogGeometry.principalExtent(segmented.points);
-      if (extent == null) return null;
-
-      cloud = segmented.points;
-      start = extent.start;
-      end = extent.end;
-    } else if (capture.taps.length >= 2) {
-      // Segmentation found too little to work with -- fall back to the
-      // user's own two taps rather than refusing to measure at all.
-      cloud = capture.points;
-      start = capture.taps.first;
-      end = capture.taps[1];
-    } else {
-      return null;
-    }
-
-    final profile = LogGeometry.buildProfile(cloud, start, end);
-
+    var profile = _segmentAndProfile(capture, scale);
     if (profile == null || profile.sections.isEmpty) return null;
+
+    // Second pass, with every tolerance re-derived from what the first pass
+    // found. The rough figures do not need to be right -- only the right
+    // order of magnitude, which even a contaminated first pass gets -- and
+    // the second pass is what has to be accurate.
+    final roughDiameter =
+        LogGeometry.medianSmoothedMinimum(profile.diametersMetres) ?? 0;
+
+    if (roughDiameter > 0 && profile.lengthMetres > 0) {
+      final refined = _segmentAndProfile(
+        capture,
+        scale.refinedFor(
+          radiusMetres: roughDiameter / 2,
+          lengthMetres: profile.lengthMetres,
+        ),
+        seedRadiusMetres: roughDiameter / 2,
+      );
+
+      // Only adopt the refined pass if it still resolved the object. A
+      // tighter tolerance that finds far fewer usable sections has rejected
+      // real surface, and the looser answer is then the honest one.
+      if (refined != null &&
+          refined.sections.length >= profile.sections.length ~/ 2 &&
+          refined.sections.isNotEmpty) {
+        profile = refined;
+      }
+    }
 
     final minDiameterMetres = LogGeometry.minDiameterFromProfile(
       profile.diametersMetres,
@@ -142,6 +153,59 @@ class LidarMeasurementSource implements MeasurementSource {
       tracedGirthInches: (minPerimeterMetres != null && minPerimeterMetres > 0)
           ? MeasurementUnits.metresToInches(minPerimeterMetres)
           : null,
+    );
+  }
+
+  /// One segmentation-and-fit pass at the given tolerances.
+  ///
+  /// Always starts from the original capture rather than from the previous
+  /// pass's output, so a first pass that wrongly discarded part of the object
+  /// cannot narrow what the second pass is allowed to see.
+  static LogProfile? _segmentAndProfile(
+    PointCloudCapture capture,
+    MeasurementScale scale, {
+    double? seedRadiusMetres,
+  }) {
+    // One tap picks the log; the ground it rests on and the logs beside it
+    // are separated out before any circle is fitted. Feeding the raw cloud
+    // straight to buildProfile is what made scans read wrong: ground points
+    // sit inside a slab as a flat sheet and drag the fitted radius out.
+    final segmented = PointCloudSegmenter.segment(
+      capture.points,
+      capture.taps.first,
+      groundToleranceMetres: scale.groundToleranceMetres,
+      connectionRadiusMetres: scale.connectionRadiusMetres,
+      minGroundExtentMetres: scale.minGroundExtentMetres,
+    );
+
+    final List<Vector3> cloud;
+    final Vector3 start;
+    final Vector3 end;
+
+    if (segmented.points.length >= 24) {
+      final extent = LogGeometry.principalExtent(segmented.points);
+      if (extent == null) return null;
+
+      cloud = segmented.points;
+      start = extent.start;
+      end = extent.end;
+    } else if (capture.taps.length >= 2) {
+      // Segmentation found too little to work with -- fall back to the
+      // user's own two taps rather than refusing to measure at all.
+      cloud = capture.points;
+      start = capture.taps.first;
+      end = capture.taps[1];
+    } else {
+      return null;
+    }
+
+    return LogGeometry.buildProfile(
+      cloud,
+      start,
+      end,
+      slabThicknessMetres: scale.slabThicknessMetres,
+      inlierToleranceMetres: scale.inlierToleranceMetres,
+      seedRadiusMetres: seedRadiusMetres,
     );
   }
 }
