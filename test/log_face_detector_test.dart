@@ -414,4 +414,127 @@ void main() {
       );
     });
   });
+
+  group('what breaks 72 independent rays', () {
+    const face = [150, 116, 78];
+    const background = [58, 64, 52];
+
+    /// Darkens everything left of [fraction] of the width, as a shadow
+    /// falling across a yard does.
+    void shadow(img.Image image, {required double fraction}) {
+      final cut = (image.width * fraction).round();
+
+      for (var y = 0; y < image.height; y++) {
+        for (var x = 0; x < cut; x++) {
+          final p = image.getPixel(x, y);
+
+          image.setPixelRgb(
+            x,
+            y,
+            (p.r * 0.4).round(),
+            (p.g * 0.4).round(),
+            (p.b * 0.4).round(),
+          );
+        }
+      }
+    }
+
+    test('a shadow across the log is not mistaken for its edge', () {
+      // Shade over almost the whole picture, with only a strip of the face
+      // in full light. Every ray crossing the shadow line meets a colour
+      // step far crisper than the one at the real boundary, so by raw
+      // contrast the shadow *is* the edge -- and the fit through it is
+      // perfectly self-consistent, so nothing downstream flags it either.
+      //
+      // Measured before the chromatic weighting: a radius of 141 for a log
+      // of 110, reported at 0.81 confidence.
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 110,
+        radiusY: 110,
+        faceRgb: face,
+        backgroundRgb: background,
+      );
+
+      shadow(image, fraction: 0.9);
+
+      final result = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(230, 200),
+      );
+
+      expect(result, isNotNull, reason: "no boundary found at all");
+
+      expect(
+        result!.ellipse.semiMajor,
+        closeTo(110, 110 * 0.15),
+        reason: "read ${result.ellipse.semiMajor.round()} for a log of 110 "
+            "-- the shadow's edge, not the log's",
+      );
+    });
+
+    test('a same-coloured object nearby is not annexed', () {
+      // Another log of the same timber lying just behind. Its colour matches
+      // the face exactly, so no colour cue can reject it -- only the fact
+      // that it is not joined to what the user tapped.
+      final image = syntheticFace(
+        centre: const Offset(150, 200),
+        radiusX: 80,
+        radiusY: 80,
+        faceRgb: face,
+        backgroundRgb: background,
+      );
+
+      for (var y = 150; y < 250; y++) {
+        for (var x = 290; x < 380; x++) {
+          image.setPixelRgb(x, y, face[0], face[1], face[2]);
+        }
+      }
+
+      final result = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(150, 200),
+      );
+
+      expect(result, isNotNull);
+
+      expect(
+        result!.ellipse.semiMajor,
+        lessThan(80 * 1.4),
+        reason: "the outline swallowed the log behind it",
+      );
+    });
+
+    test('a knot near the rim does not cut the face short', () {
+      // A dark knot sitting just inside the boundary. A ray that meets it
+      // stops there, reporting a face smaller than it is -- and a face
+      // reported small is timber the mill never gets told it has.
+      final image = syntheticFace(
+        centre: const Offset(200, 200),
+        radiusX: 100,
+        radiusY: 100,
+        faceRgb: face,
+        backgroundRgb: background,
+      );
+
+      for (var y = 175; y < 215; y++) {
+        for (var x = 265; x < 295; x++) {
+          image.setPixelRgb(x, y, 40, 30, 22);
+        }
+      }
+
+      final result = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(200, 200),
+      );
+
+      expect(result, isNotNull);
+
+      expect(
+        result!.ellipse.semiMajor,
+        closeTo(100, 100 * 0.2),
+        reason: "stopped at the knot rather than the rim",
+      );
+    });
+  });
 }

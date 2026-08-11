@@ -241,6 +241,35 @@ class LogFaceDetector {
     );
   }
 
+  /// How far two colours differ once brightness is divided out.
+  ///
+  /// Each colour is reduced to its share of red, green and blue in its own
+  /// total, so scaling every channel by the same factor -- which is what
+  /// shade does -- leaves the value unchanged. What survives is a change of
+  /// material.
+  static double _chromaticShift(
+    double innerR,
+    double innerG,
+    double innerB,
+    double outerR,
+    double outerG,
+    double outerB,
+  ) {
+    final innerTotal = innerR + innerG + innerB;
+    final outerTotal = outerR + outerG + outerB;
+
+    // Near-black on either side carries no reliable hue: the ratios are
+    // then decided by sensor noise, and a large meaningless shift would
+    // make deep shadow look like the strongest boundary on the ray.
+    if (innerTotal < 24 || outerTotal < 24) return 0;
+
+    final dr = innerR / innerTotal - outerR / outerTotal;
+    final dg = innerG / innerTotal - outerG / outerTotal;
+    final db = innerB / innerTotal - outerB / outerTotal;
+
+    return math.sqrt(dr * dr + dg * dg + db * db);
+  }
+
   /// Distance from [origin] to the nearest image edge, so rays never sample
   /// outside the picture.
   static double _maxUsableRadius(img.Image image, Offset origin) {
@@ -354,11 +383,40 @@ class LogFaceDetector {
 
       final edgeStrength = gradient.getPixel(gx, gy).luminanceNormalized;
 
+      // How much the *colour* changes, as opposed to the brightness.
+      //
+      // This is what separates a shadow from a material boundary, and it is
+      // the difference the detector was missing. Shade scales all three
+      // channels together: the timber under it is still timber-coloured,
+      // just darker. A real edge -- sawn face to bark, bark to ground -- is
+      // a change of material, and materials differ in hue as well as in
+      // brightness.
+      //
+      // Without this, the hard line where a shadow crosses a log is the
+      // strongest boundary on the ray, the search anchors on it, and the
+      // face is reported as ending there. Measured on a half-shaded face:
+      // a radius of 90 against a true 110, and no warning, because the
+      // shadow edge is genuinely crisp and the fit through it genuinely
+      // consistent.
+      final chromatic = _chromaticShift(
+        innerR, innerG, innerB, //
+        outerR, outerG, outerB,
+      );
+
+      // A weight, not a gate. A grey log on grey concrete is a real edge
+      // with almost no hue change, and refusing it outright would trade one
+      // failure for another; weighting merely means a shadow has to be a
+      // far bigger step than a material boundary to outrank it.
+      final chromaWeight = (0.35 + chromatic * 8).clamp(0.35, 2.0);
+
       // The gradient corroborates rather than decides. A soft but real
       // colour boundary still counts; a hard gradient with no colour change
       // (a shadow line across the face) does not.
       candidates.add(
-        (radius: r.toDouble(), score: change * (0.4 + edgeStrength)),
+        (
+          radius: r.toDouble(),
+          score: change * (0.4 + edgeStrength) * chromaWeight,
+        ),
       );
     }
 
