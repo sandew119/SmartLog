@@ -155,26 +155,36 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
         let gathering = isAccumulating
         stateLock.unlock()
 
+        currentTrackingState = trackingStateName(frame.camera.trackingState)
+
+        let now = frame.timestamp
+
+        // Report before any of the guards below, always.
+        //
+        // This used to sit past both of them, which made the screen mute in
+        // the two situations the user most needs to be spoken to. Before a
+        // tap has landed nothing is accumulating, so no progress was sent at
+        // all: no guidance, no checklist, no size, and a Finish button that
+        // could never explain itself. And when tracking drops the frame
+        // returned early, so "Hold steady" -- written precisely for that
+        // moment -- was unreachable, and the app simply went quiet at the
+        // instant it had something to say.
+        if now - lastStatsTime >= 0.25 {
+            lastStatsTime = now
+            reportProgress()
+        }
+
         guard gathering else { return }
 
         // Only fold in frames the tracker is confident about. Points
         // captured while tracking is limited are placed against a drifting
         // world origin, which smears the accumulated cloud and would widen
         // every circle fit.
-        currentTrackingState = trackingStateName(frame.camera.trackingState)
-
         if case .normal = frame.camera.trackingState {} else { return }
-
-        let now = frame.timestamp
 
         if now - lastAccumulationTime >= accumulationInterval {
             lastAccumulationTime = now
             accumulate(frame: frame)
-        }
-
-        if now - lastStatsTime >= 0.25 {
-            lastStatsTime = now
-            reportProgress()
         }
 
         if now - lastOverlayTime >= overlayInterval {
@@ -373,6 +383,7 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
         stateLock.lock()
         let stats = accumulator.stats
         let cloud = accumulator.snapshot(minSightings: 1)
+        let sweeping = isAccumulating
         stateLock.unlock()
 
         // Coverage in the log's own frame, not the world's. A bounding box
@@ -403,6 +414,10 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
                 "endFillEnd": Double(coverage.endFillEnd),
                 "axialBins": coverage.axialBins,
                 "trackingState": currentTrackingState,
+                // Whether a tap has landed and gathering has begun. Without
+                // this Dart cannot tell "nothing scanned yet" from "the tap
+                // never registered", and those need opposite instructions.
+                "sweeping": sweeping,
             ]
         )
     }
@@ -470,6 +485,20 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
     /// Resolves a screen point to a world position using the depth-backed
     /// raycast, falling back to estimated planes.
     private func worldPoint(at location: CGPoint) -> simd_float3? {
+        // The depth map first, because it is the only method that works on
+        // the objects this app is for.
+        //
+        // A raycast resolves a tap by intersecting it with a *plane* ARKit
+        // has estimated, and a hit test needs feature points, which need
+        // visual texture. A log end has neither: it is small, curved, and
+        // often plain. So the tap silently missed, "No surface found there"
+        // came back, accumulation never started, and every symptom followed
+        // from that -- no guidance, no measurement, nothing to finish.
+        //
+        // The phone has a depth sensor pointed at exactly that pixel. Its
+        // reading needs no plane, no texture and no estimation.
+        if let point = depthPoint(at: location) { return point }
+
         if #available(iOS 14.0, *) {
             // .estimatedPlane + .any gives a result on an irregular log
             // surface, where existing-plane raycasts would find nothing.
@@ -492,6 +521,96 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
 
         let t = hit.worldTransform.columns.3
         return simd_float3(t.x, t.y, t.z)
+    }
+
+    /// Reads the LiDAR depth under a tapped screen point and unprojects it.
+    ///
+    /// The tap is in view coordinates; the depth map is a small image of the
+    /// same view, so the two relate by a straight proportion of width and
+    /// height. Depth is sampled over a small window and the median taken,
+    /// so one dropped or noisy return at the exact tapped pixel does not
+    /// decide where the log is.
+    private func depthPoint(at location: CGPoint) -> simd_float3? {
+        guard #available(iOS 14.0, *) else { return nil }
+
+        stateLock.lock()
+        let frameOrNil = latestFrame
+        stateLock.unlock()
+
+        guard let frame = frameOrNil,
+              let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
+              let depths = DepthUnprojector.floats(from: depthData.depthMap)
+        else { return nil }
+
+        let width = CVPixelBufferGetWidth(depthData.depthMap)
+        let height = CVPixelBufferGetHeight(depthData.depthMap)
+
+        guard width > 0, height > 0, depths.count >= width * height else {
+            return nil
+        }
+
+        let bounds = sceneView.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+
+        let u = Float(location.x / bounds.width)
+        let v = Float(location.y / bounds.height)
+
+        guard u >= 0, u <= 1, v >= 0, v <= 1 else { return nil }
+
+        let centreX = Int(u * Float(width - 1))
+        let centreY = Int(v * Float(height - 1))
+
+        var samples: [Float] = []
+
+        for dy in -2...2 {
+            for dx in -2...2 {
+                let x = centreX + dx
+                let y = centreY + dy
+
+                guard x >= 0, x < width, y >= 0, y < height else { continue }
+
+                let depth = depths[y * width + x]
+
+                // Beyond the sensor's useful range, or no return at all.
+                guard depth.isFinite, depth > 0.05, depth < 5 else { continue }
+
+                samples.append(depth)
+            }
+        }
+
+        guard samples.count >= 3 else { return nil }
+
+        samples.sort()
+        let depth = samples[samples.count / 2]
+
+        // Unproject through the camera intrinsics, scaled from the
+        // full-resolution image the intrinsics describe down to the depth
+        // map's own size.
+        let intrinsics = frame.camera.intrinsics
+        let resolution = frame.camera.imageResolution
+
+        let scaleX = Float(width) / Float(resolution.width)
+        let scaleY = Float(height) / Float(resolution.height)
+
+        let fx = intrinsics[0][0] * scaleX
+        let fy = intrinsics[1][1] * scaleY
+        let cx = intrinsics[2][0] * scaleX
+        let cy = intrinsics[2][1] * scaleY
+
+        guard fx > 0, fy > 0 else { return nil }
+
+        // ARKit's camera space looks down -Z, with +Y up the image, so the
+        // vertical term is negated against the pixel row.
+        let cameraPoint = simd_float4(
+            (Float(centreX) - cx) / fx * depth,
+            -(Float(centreY) - cy) / fy * depth,
+            -depth,
+            1
+        )
+
+        let world = frame.camera.transform * cameraPoint
+
+        return simd_float3(world.x, world.y, world.z)
     }
 
     private func addMarker(at position: simd_float3) {

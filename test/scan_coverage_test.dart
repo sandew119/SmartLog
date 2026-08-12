@@ -115,6 +115,42 @@ void main() {
     });
   });
 
+  group('telling a dead scanner from an empty one', () {
+    test('the sweeping flag survives the payload', () {
+      // Without it, "nothing scanned yet" and "the tap never registered"
+      // are indistinguishable -- and they need opposite instructions.
+      expect(
+        ScanProgress.fromNative(const {"sweeping": true}).sweeping,
+        isTrue,
+      );
+      expect(ScanProgress.fromNative(const {}).sweeping, isFalse);
+      expect(
+        ScanProgress.fromNative(const {"sweeping": "yes"}).sweeping,
+        isFalse,
+        reason: "a non-boolean must not read as sweeping",
+      );
+    });
+
+    test('the read-out names every requirement and the link itself', () {
+      // What someone reads back when a scan will not complete. It has to
+      // distinguish a failing requirement from a scanner sending nothing.
+      final text = ScanCoverage(good()).diagnostics;
+
+      for (final field in ["pts", "len", "arc", "r ", "ends", "track", "sweep"]) {
+        expect(text, contains(field), reason: "missing $field");
+      }
+    });
+
+    test('the read-out works before anything has been scanned', () {
+      // The moment it matters most is the moment there is no data, so it
+      // must not throw or divide by zero there.
+      expect(
+        () => ScanCoverage(const ScanProgress()).diagnostics,
+        returnsNormally,
+      );
+    });
+  });
+
   group('the size shown while sweeping', () {
     test('reads in both systems once there is something to measure', () {
       final coverage = ScanCoverage(

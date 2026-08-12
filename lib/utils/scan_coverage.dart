@@ -43,6 +43,13 @@ class ScanProgress {
   /// ARKit's own view of whether it is tracking properly.
   final bool trackingReliable;
 
+  /// Whether a tap has landed and the scanner is gathering.
+  ///
+  /// Distinguishes "nothing has been scanned yet" from "the tap never
+  /// registered", which need opposite instructions and used to be
+  /// indistinguishable -- both simply showed nothing.
+  final bool sweeping;
+
   const ScanProgress({
     this.pointCount = 0,
     this.axisLengthMetres = 0,
@@ -52,6 +59,7 @@ class ScanProgress {
     this.axialBins = const [],
     this.radiusMetres = 0,
     this.trackingReliable = true,
+    this.sweeping = false,
   });
 
   /// Reads a native progress payload, defaulting anything missing.
@@ -84,6 +92,7 @@ class ScanProgress {
           : const [],
       radiusMetres: number("radiusMetres"),
       trackingReliable: raw["trackingState"] == "normal",
+      sweeping: raw["sweeping"] == true,
     );
   }
 }
@@ -343,6 +352,26 @@ class ScanCoverage {
 
     return "${UnitDisplay.across(diameterInches)}   across\n"
         "${UnitDisplay.length(lengthFeet)}   long";
+  }
+
+  /// The raw figures, for the read-out on the scan screen.
+  ///
+  /// On screen deliberately. Every number the Finish decision rests on is
+  /// derived on a device that cannot be tested against, and when a scan
+  /// will not complete there is otherwise no way -- for the user or for
+  /// anyone helping them -- to tell which of the four requirements is the
+  /// one failing, or whether the scanner is receiving anything at all.
+  String get diagnostics {
+    final p = progress;
+
+    return "pts ${p.pointCount}/$requiredPoints  "
+        "len ${p.axisLengthMetres.toStringAsFixed(2)}m  "
+        "arc ${p.angularCoverageDegrees.round()}°  "
+        "r ${(p.radiusMetres * 100).toStringAsFixed(1)}cm\n"
+        "ends ${p.endFillStart.toStringAsFixed(2)}/"
+        "${p.endFillEnd.toStringAsFixed(2)}  "
+        "track ${p.trackingReliable ? 'ok' : 'LOST'}  "
+        "sweep ${p.sweeping ? 'on' : 'OFF'}";
   }
 
   /// Per-section coverage, 0..1, for a bar showing where the thin spots are.

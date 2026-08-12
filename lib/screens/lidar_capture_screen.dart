@@ -86,7 +86,22 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
   void _onProgress(Object? arguments) {
     if (arguments is! Map) return;
 
-    setState(() => _progress = ScanProgress.fromNative(arguments));
+    final progress = ScanProgress.fromNative(arguments);
+
+    setState(() {
+      _progress = progress;
+
+      // The native side is the authority on whether a tap actually landed.
+      //
+      // The stage used to advance only on the "tapped" message, so if that
+      // message was ever missed the screen sat on "Tap the log" for ever
+      // with no checklist, no size and a dead Finish button -- looking
+      // exactly like a scanner that does not work.
+      if (progress.sweeping && _stage == _Stage.aiming) {
+        _stage = _Stage.sweeping;
+        _hint = null;
+      }
+    });
   }
 
   /// Whether a measurement taken now would be worth trusting.
@@ -240,11 +255,34 @@ class _LidarCaptureScreenState extends State<LidarCaptureScreen> {
           // What is still outstanding. A disabled Finish button with no
           // explanation is the most frustrating thing an app can do, so
           // every requirement is on screen with its current state.
+          // Always on screen, at every stage.
+          //
+          // Every figure the Finish decision rests on is computed on a
+          // device none of it can be tested against. When a scan will not
+          // complete, this is the only way to tell which requirement is
+          // failing -- or whether the scanner is sending anything at all,
+          // which is a different problem with a different fix.
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 96,
+            child: Text(
+              _coverage.diagnostics,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white38,
+                fontSize: 10,
+                height: 1.4,
+                fontFamily: "monospace",
+              ),
+            ),
+          ),
+
           if (_stage == _Stage.sweeping)
             Positioned(
               left: 16,
               right: 16,
-              bottom: 110,
+              bottom: 130,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
