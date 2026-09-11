@@ -1,7 +1,10 @@
 import 'dart:convert';
 
+import '../utils/log_girth_model.dart';
 import '../utils/timber_volume.dart';
 import '../utils/unit_display.dart';
+
+export '../utils/log_girth_model.dart' show GirthSource;
 
 /// Where a log's dimensions came from. Persisted so a disputed volume can
 /// be audited later -- for a commercial product that's a requirement, not a
@@ -54,6 +57,27 @@ class LogMeasurement {
 
   final MeasurementSourceKind source;
 
+  /// Girth of the cut end the scan started at, traced all the way round it.
+  ///
+  /// Present only for the two-end scan. Shown on its own line because it is
+  /// the one figure the user can check with a tape in ten seconds, and a
+  /// figure they can check is a figure they will trust.
+  final double? faceGirthInches;
+
+  /// Girth of the far cut end, when it was scanned rather than marked.
+  final double? farFaceGirthInches;
+
+  /// Where along the log [minGirthInches] was found.
+  final GirthSource? minGirthSource;
+
+  /// Whether the trunk between the ends was seen well enough to look for a
+  /// waist. When false, the thinner end stands for the whole log.
+  final bool trunkMeasured;
+
+  /// True when the far end was marked by eye rather than scanned, so the
+  /// length is the app's best estimate rather than a measurement.
+  final bool lengthEstimated;
+
   const LogMeasurement({
     required this.minDiameterInches,
     required this.lengthFeet,
@@ -64,7 +88,24 @@ class LogMeasurement {
     this.meanResidualMm,
     this.minAngularSpanDegrees,
     this.tracedGirthInches,
+    this.faceGirthInches,
+    this.farFaceGirthInches,
+    this.minGirthSource,
+    this.trunkMeasured = false,
+    this.lengthEstimated = false,
   });
+
+  /// Whether this came from the two-end scan, whose quality is judged on
+  /// what it saw rather than on circle-fit statistics it does not produce.
+  bool get isEndToEndScan => faceGirthInches != null;
+
+  /// Where the thinnest girth was, in words.
+  String? get minGirthWhere => switch (minGirthSource) {
+        GirthSource.nearEnd => "at the first end",
+        GirthSource.farEnd => "at the far end",
+        GirthSource.trunk => "along the log",
+        null => null,
+      };
 
   /// Hand-typed dimensions. Quality is not scored -- the user asserted
   /// these, so there is nothing for the app to be uncertain about.
@@ -108,6 +149,16 @@ class LogMeasurement {
       return MeasurementQuality.poor;
     }
 
+    // The two-end scan refuses to finish on a face it could not trace, so
+    // what is left to judge is only how much of the log it saw.
+    if (isEndToEndScan) {
+      if (lengthEstimated) return MeasurementQuality.fair;
+      if (!trunkMeasured && farFaceGirthInches == null) {
+        return MeasurementQuality.fair;
+      }
+      return MeasurementQuality.good;
+    }
+
     final span = minAngularSpanDegrees;
     if (span != null && span < minUsableAngularSpanDegrees) {
       return MeasurementQuality.poor;
@@ -143,6 +194,16 @@ class LogMeasurement {
 
     if (minDiameterInches <= 0 || lengthFeet <= 0) {
       return "Could not measure the log. Move closer and try again.";
+    }
+
+    if (isEndToEndScan) {
+      if (lengthEstimated) {
+        return "The far end was marked by eye, not scanned, so the length "
+            "is an estimate. Scan the far end's cut face for an exact length.";
+      }
+
+      return "Only one end could be measured, so its girth stands for the "
+          "whole log. Scan the far end too if the log tapers.";
     }
 
     final span = minAngularSpanDegrees;

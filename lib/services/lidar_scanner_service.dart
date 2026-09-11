@@ -4,7 +4,10 @@ import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart';
 
-/// A depth capture returned by the native scanner.
+/// A whole-log point cloud, in the shape the earlier sweep scanner captured
+/// it. The live scan no longer produces one -- it streams [DepthFrame]s --
+/// but [LidarMeasurementSource.measurementFrom] still measures recorded
+/// clouds in this form.
 class PointCloudCapture {
   /// World-space points, in metres.
   final List<Vector3> points;
@@ -68,37 +71,79 @@ class LidarScannerService {
     }
   }
 
-  /// Clears the tap markers on a live scan view.
-  Future<void> clearTaps(int viewId) async {
+  static MethodChannel _view(int viewId) =>
+      MethodChannel("smartlog/lidar_scanner/view_$viewId");
+
+  /// Starts depth frames flowing to Dart as `frame` calls on the view's
+  /// channel. [decimation] keeps every Nth depth pixel (1, 2 or 4).
+  Future<void> startStreaming(
+    int viewId, {
+    int decimation = 2,
+    int intervalMs = 100,
+  }) async {
     try {
-      await MethodChannel("smartlog/lidar_scanner/view_$viewId")
-          .invokeMethod<void>("clearTaps");
+      await _view(viewId).invokeMethod<void>("start", {
+        "decimation": decimation,
+        "intervalMs": intervalMs,
+      });
     } catch (_) {}
   }
 
-  /// Stops folding new frames into the accumulated cloud.
-  ///
-  /// Called before capturing so the cloud cannot shift underneath the
-  /// measurement while it is being read.
-  Future<void> stopSweep(int viewId) async {
+  Future<void> stopStreaming(int viewId) async {
     try {
-      await MethodChannel("smartlog/lidar_scanner/view_$viewId")
-          .invokeMethod<void>("stopSweep");
+      await _view(viewId).invokeMethod<void>("stop");
     } catch (_) {}
   }
 
-  /// Captures the current depth frame as a world-space point cloud.
-  ///
-  /// Returns null on any failure -- caller falls back to manual entry.
-  Future<PointCloudCapture?> capture(int viewId) async {
+  /// Tells the native side the last frame has been dealt with, so it may
+  /// send the next. Without this frames are held back, never queued -- the
+  /// scan always works on what the camera sees now.
+  Future<void> ackFrame(int viewId) async {
     try {
-      final raw = await MethodChannel("smartlog/lidar_scanner/view_$viewId")
-          .invokeMapMethod<String, dynamic>("capture");
+      await _view(viewId).invokeMethod<void>("ack");
+    } catch (_) {}
+  }
 
-      return parseCapture(raw);
-    } catch (_) {
-      return null;
-    }
+  /// Draws a disc on a log end the scan has locked onto.
+  Future<void> showMarker(
+    int viewId, {
+    required String id,
+    required Vector3 position,
+    required Vector3 normal,
+    required double radius,
+  }) async {
+    try {
+      await _view(viewId).invokeMethod<void>("showMarker", {
+        "id": id,
+        "x": position.x,
+        "y": position.y,
+        "z": position.z,
+        "nx": normal.x,
+        "ny": normal.y,
+        "nz": normal.z,
+        "radius": radius,
+      });
+    } catch (_) {}
+  }
+
+  Future<void> clearMarkers(int viewId) async {
+    try {
+      await _view(viewId).invokeMethod<void>("clearMarkers");
+    } catch (_) {}
+  }
+
+  /// Says a milestone out loud, for a user whose eyes are on the log.
+  Future<void> speak(int viewId, String text) async {
+    try {
+      await _view(viewId).invokeMethod<void>("speak", {"text": text});
+    } catch (_) {}
+  }
+
+  /// Resets world tracking, for starting a scan over from nothing.
+  Future<void> restartTracking(int viewId) async {
+    try {
+      await _view(viewId).invokeMethod<void>("restartTracking");
+    } catch (_) {}
   }
 
   /// Decodes a capture payload.

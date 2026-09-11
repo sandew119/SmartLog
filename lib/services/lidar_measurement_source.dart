@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:vector_math/vector_math_64.dart';
 
 import '../models/log_measurement.dart';
-import '../screens/lidar_capture_screen.dart';
+import '../screens/log_scanner_screen.dart';
 import '../utils/log_geometry.dart';
 import '../utils/log_volume_pipeline.dart';
 import '../utils/measurement_scale.dart';
@@ -13,9 +13,10 @@ import 'measurement_source.dart';
 
 /// Measures a log from the iPhone's LiDAR depth stream.
 ///
-/// Collects a point cloud from the native AR view, then does every piece of
-/// geometry in Dart via [LogGeometry] -- circle fitting, axis refinement,
-/// quality gates -- so the accuracy-critical logic stays testable off-device.
+/// The live scan is [LogScannerScreen]: one cut end, a walk, the other cut
+/// end, with every piece of geometry in tested Dart. [measurementFrom] below
+/// is the earlier whole-log point-cloud pipeline, kept because its circle
+/// fitting still serves recorded clouds and its tests pin its behaviour.
 class LidarMeasurementSource implements MeasurementSource {
   const LidarMeasurementSource();
 
@@ -27,32 +28,24 @@ class LidarMeasurementSource implements MeasurementSource {
 
   @override
   List<String> get guidance => const [
-        "Stand 0.7–1.5 m from the log and square to it, so the sensor sees "
-            "as much of its curve as possible.",
-        "Tap the log once to choose it. The app separates it from the "
-            "ground and from the logs beside it.",
-        "Walk slowly from one end to the other, keeping the log in frame. "
-            "The more of its curve you show the sensor, the tighter the "
-            "girth.",
-        "Avoid direct sunlight — it swamps the infrared sensor. Shade gives "
-            "a far better reading.",
-        "Wet or very dark bark reflects less; move closer if the reading "
-            "comes back uncertain.",
+        "Stand about one step from the log's cut end and point the phone at "
+            "it. Hold still — the app finds the end by itself and says when "
+            "it is done.",
+        "Walk to the other end, keeping the log in the middle of the screen.",
+        "Point at the other cut end. The length is measured in a straight "
+            "line from end to end.",
+        "Shade works better than direct sun, which blinds the depth sensor.",
       ];
 
   @override
   Future<bool> isSupported() => LidarScannerService.instance.isSupported();
 
   @override
-  Future<LogMeasurement?> measure(BuildContext context) async {
-    final capture = await Navigator.push<PointCloudCapture?>(
+  Future<LogMeasurement?> measure(BuildContext context) {
+    return Navigator.push<LogMeasurement?>(
       context,
-      MaterialPageRoute(builder: (_) => const LidarCaptureScreen()),
+      MaterialPageRoute(builder: (_) => const LogScannerScreen()),
     );
-
-    if (capture == null || capture.taps.isEmpty) return null;
-
-    return measurementInBackground(capture);
   }
 
   /// Runs [measurementFrom] off the UI thread.

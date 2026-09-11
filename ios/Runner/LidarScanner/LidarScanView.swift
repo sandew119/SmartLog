@@ -1,92 +1,78 @@
 import ARKit
+import AVFoundation
 import Flutter
 import Foundation
 import SceneKit
 import UIKit
 import simd
 
-/// Hosts our own `ARSCNView` as a Flutter platform view.
+/// Hosts the AR camera as a Flutter platform view and streams depth frames
+/// to Dart.
+///
+/// This is a pump and nothing else. It does no geometry: every decision
+/// about where the log is, how big it is and whether the scan is good enough
+/// is made in Dart (`lib/utils/face_scan.dart`, `log_girth_model.dart`,
+/// `log_scan_session.dart`), where it is covered by tests run against
+/// synthetic depth scenes. The previous version put 800 lines of geometry
+/// here, on the one side of the app that can never be tested from the
+/// machine it is written on, and it never worked on a device.
+///
+/// What it does do, and why each matters on a real phone:
+///
+/// - Every message to Dart is sent on the main thread. Flutter requires it;
+///   the previous version sent from the ARKit queue, which Flutter rejects.
+/// - A frame is sent only once Dart has finished with the last one. If Dart
+///   falls behind, frames are dropped here rather than queued up in the
+///   channel, so the scan is always working on what the camera sees now.
+/// - No `ARFrame` is ever held on to. ARKit stops delivering frames to a
+///   delegate that retains them, which looks exactly like a frozen camera.
 ///
 /// We cannot reuse `arkit_plugin` for this: an `ARSCNView` owns its
-/// `ARSession`, and starting a second session for `.sceneDepth` pauses the
-/// first -- you get a frozen preview and a dead session. So this screen
-/// runs its own session, and must never be shown at the same time as the
+/// `ARSession`, and a second session for `.sceneDepth` pauses the first. So
+/// this screen runs its own, and must never be open at the same time as the
 /// Optimal Cutting AR screen.
 class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
 
     private let sceneView: ARSCNView
     private let channel: FlutterMethodChannel
 
-    /// Most recent frame, kept so a capture can be taken on demand rather
-    /// than streaming every frame across the channel.
-    private var latestFrame: ARFrame?
-
-    /// Markers the user has tapped, in world space.
-    private var tappedPoints: [simd_float3] = []
-
-    /// Depth merged across the whole sweep. See `DepthAccumulator` for why a
-    /// single frame cannot measure a log.
-    private let accumulator = DepthAccumulator()
-
-    /// Whether frames are currently being folded in. Accumulation starts
-    /// when the user picks a log, not before, so the ground they walked
-    /// over on the way does not end up in the cloud.
-    private var isAccumulating = false
-
-    /// Wall-clock time of the last frame folded in.
-    private var lastAccumulationTime: TimeInterval = 0
-
-    /// Fold in about ten frames a second. Unprojecting every frame at 60 Hz
-    /// costs far more battery and CPU than it adds coverage, since
-    /// consecutive frames from a slowly moving phone are nearly identical.
-    private let accumulationInterval: TimeInterval = 0.1
-
-    /// Sample every Nth depth pixel while sweeping. The full map is ~49k
-    /// points per frame; at ten frames a second that is more than the voxel
-    /// grid can usefully absorb, and it drops frames on older devices.
-    private let accumulationStride = 2
-
-    /// Throttles telemetry back to Dart so the UI updates smoothly without
-    /// flooding the channel.
-    private var lastStatsTime: TimeInterval = 0
-
-    /// Frame callbacks run here rather than on the main thread.
-    ///
-    /// Unprojecting a depth map is tens of thousands of points of work, ten
-    /// times a second. ARKit delivers frames on the main queue by default,
-    /// so leaving it there would stutter the very camera preview the user is
-    /// aiming with.
+    /// Frame callbacks arrive here rather than on the main thread, so copying
+    /// the depth map out never stutters the camera preview.
     private let sessionQueue = DispatchQueue(
         label: "smartlog.lidar.session",
         qos: .userInitiated
     )
 
-    /// Guards state now touched from both the session queue and the channel.
+    /// Guards everything below, which the session queue and the main thread
+    /// both touch.
     private let stateLock = NSLock()
 
-    /// Shows the user what has actually been captured so far.
-    private let capturedNode = SCNNode()
+    private var isStreaming = false
+    private var awaitingAck = false
+    private var lastSentTime: TimeInterval = 0
 
-    /// The sleeve and end caps drawn around the log the app has locked onto.
-    /// Kept apart from `capturedNode` so the points and the shape can be
-    /// rebuilt at different rates without one clearing the other.
-    private let highlightNode = SCNNode()
+    /// When the last frame went out. If Dart never answers -- an exception on
+    /// its side, a hot reload -- streaming resumes after this long rather
+    /// than stalling for good.
+    private var sentAt: TimeInterval = 0
+    private let ackTimeout: TimeInterval = 1.0
 
-    /// Latest coverage, computed with the progress tick and reused by the
-    /// overlay so the analysis is not run twice a second for two purposes.
-    private var latestCoverage = ScanCoverageAnalyser.Coverage.empty
+    /// Seconds between frames. Ten a second is plenty to feel live; the
+    /// backpressure above means the real rate is whatever Dart can keep up
+    /// with, never more.
+    private var frameInterval: TimeInterval = 0.1
 
-    private var currentTrackingState = "unknown"
+    /// Every Nth depth pixel. 2 halves the 256x192 map to 128x96, which is
+    /// ~12k samples a frame: ample for a log end at arm's length, and small
+    /// enough to cross the channel ten times a second. Restricted to exact
+    /// divisors of the map so the decimated grid keeps the map's exact
+    /// proportions -- Dart rescales the intrinsics on that assumption.
+    private var decimation = 2
 
-    private var lastOverlayTime: TimeInterval = 0
-
-    /// Redrawing the overlay is the most expensive thing on screen, and it
-    /// only has to feel live, not be smooth.
-    private let overlayInterval: TimeInterval = 0.5
-
-    /// Points drawn in the overlay. Enough to read as a solid surface,
-    /// few enough to rebuild twice a second without dropping frames.
-    private let overlayPointBudget = 6000
+    /// Speaks the milestones -- "Face scan complete", "Length complete" --
+    /// for someone whose eyes are on the log, not the screen. Held for the
+    /// life of the view: a synthesizer released mid-sentence stops talking.
+    private let speech = AVSpeechSynthesizer()
 
     init(frame: CGRect, viewId: Int64, messenger: FlutterBinaryMessenger) {
         sceneView = ARSCNView(frame: frame)
@@ -99,19 +85,11 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
 
         sceneView.session.delegate = self
         sceneView.session.delegateQueue = sessionQueue
-        sceneView.automaticallyUpdatesLighting = true
-        sceneView.scene.rootNode.addChildNode(capturedNode)
-        sceneView.scene.rootNode.addChildNode(highlightNode)
+        sceneView.automaticallyUpdatesLighting = false
 
         channel.setMethodCallHandler { [weak self] call, result in
             self?.handle(call, result: result)
         }
-
-        let tap = UITapGestureRecognizer(
-            target: self,
-            action: #selector(handleTap(_:))
-        )
-        sceneView.addGestureRecognizer(tap)
 
         startSession()
     }
@@ -127,9 +105,8 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
         configuration.worldAlignment = .gravity
 
         if #available(iOS 14.0, *) {
-            // Prefer smoothed depth: it is temporally filtered, which cuts
-            // the frame-to-frame flicker that would otherwise show up as
-            // noise in the circle fits.
+            // Smoothed depth is filtered over time, which takes the
+            // frame-to-frame flicker out of the edge of a log end.
             if ARWorldTrackingConfiguration
                 .supportsFrameSemantics(.smoothedSceneDepth) {
                 configuration.frameSemantics.insert(.smoothedSceneDepth)
@@ -139,10 +116,6 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
             }
         }
 
-        // Deliberately NOT enabling sceneReconstruction: ARKit's mesh is
-        // smoothed and decimated, which is worse for sub-centimetre circle
-        // fitting than the raw depth map, and it costs CPU and battery.
-
         sceneView.session.run(
             configuration,
             options: [.resetTracking, .removeExistingAnchors]
@@ -150,652 +123,201 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        stateLock.lock()
-        latestFrame = frame
-        let gathering = isAccumulating
-        stateLock.unlock()
-
-        currentTrackingState = trackingStateName(frame.camera.trackingState)
-
         let now = frame.timestamp
 
-        // Report before any of the guards below, always.
-        //
-        // This used to sit past both of them, which made the screen mute in
-        // the two situations the user most needs to be spoken to. Before a
-        // tap has landed nothing is accumulating, so no progress was sent at
-        // all: no guidance, no checklist, no size, and a Finish button that
-        // could never explain itself. And when tracking drops the frame
-        // returned early, so "Hold steady" -- written precisely for that
-        // moment -- was unreachable, and the app simply went quiet at the
-        // instant it had something to say.
-        if now - lastStatsTime >= 0.25 {
-            lastStatsTime = now
-            reportProgress()
-        }
-
-        guard gathering else { return }
-
-        // Only fold in frames the tracker is confident about. Points
-        // captured while tracking is limited are placed against a drifting
-        // world origin, which smears the accumulated cloud and would widen
-        // every circle fit.
-        if case .normal = frame.camera.trackingState {} else { return }
-
-        if now - lastAccumulationTime >= accumulationInterval {
-            lastAccumulationTime = now
-            accumulate(frame: frame)
-        }
-
-        if now - lastOverlayTime >= overlayInterval {
-            lastOverlayTime = now
-            refreshOverlay()
-            refreshHighlight()
-        }
-    }
-
-    /// Draws the captured surface back over the camera feed.
-    ///
-    /// Without this the user taps a log and gets no confirmation of what the
-    /// app actually picked up -- a mis-aimed tap stays invisible until the
-    /// number comes out wrong. Seeing the trunk fill in as they walk is also
-    /// what tells them which stretch they have missed.
-    private func refreshOverlay() {
         stateLock.lock()
-        let points = accumulator.snapshot()
+        let due = isStreaming
+            && now - lastSentTime >= frameInterval
+            && (!awaitingAck || now - sentAt > ackTimeout)
+        let stride = decimation
         stateLock.unlock()
 
-        guard points.count >= 8 else { return }
+        guard due else { return }
 
-        // Even spacing rather than the first N, so the overlay reflects the
-        // whole sweep instead of wherever gathering started.
-        let step = max(1, points.count / overlayPointBudget)
-        var sampled: [SCNVector3] = []
-        sampled.reserveCapacity(min(points.count, overlayPointBudget))
-
-        var index = 0
-        while index < points.count {
-            let p = points[index]
-            sampled.append(SCNVector3(p.x, p.y, p.z))
-            index += step
-        }
-
-        let source = SCNGeometrySource(vertices: sampled)
-
-        let indices = (0..<Int32(sampled.count)).map { $0 }
-        let element = SCNGeometryElement(
-            indices: indices,
-            primitiveType: .point
-        )
-        element.pointSize = 4
-        element.minimumPointScreenSpaceRadius = 2
-        element.maximumPointScreenSpaceRadius = 6
-
-        let geometry = SCNGeometry(sources: [source], elements: [element])
-
-        let material = SCNMaterial()
-        material.diffuse.contents = UIColor.systemGreen
-        material.lightingModel = .constant
-        material.isDoubleSided = true
-        geometry.materials = [material]
-
-        // SceneKit's graph belongs to the main thread; frames arrive on the
-        // session queue.
-        DispatchQueue.main.async { [weak self] in
-            self?.capturedNode.geometry = geometry
-        }
-    }
-
-    /// Draws the log the app has locked onto: a sleeve along the fitted
-    /// axis, and a disc at each end.
-    ///
-    /// The point cloud alone does not tell the user whether the app has
-    /// understood what it is looking at -- a haze of green dots looks much
-    /// the same whether it has found a log or a fence rail. The sleeve says
-    /// "this cylinder is what I am about to measure", so a mis-aimed tap is
-    /// obvious immediately rather than after the number comes out wrong.
-    ///
-    /// The end discs are the other half: they turn green only once that end
-    /// has actually been observed, which is the thing the sweep was
-    /// previously finishing without.
-    private func refreshHighlight() {
-        let coverage = latestCoverage
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-
-            self.highlightNode.childNodes.forEach { $0.removeFromParentNode() }
-
-            guard coverage.isUsable else { return }
-
-            let axis = simd_normalize(coverage.axis)
-            let midpoint = coverage.centroid
-                + axis * ((coverage.minT + coverage.maxT) / 2)
-
-            // SceneKit builds cylinders up the Y axis, so the sleeve has to
-            // be turned onto the log's own direction.
-            let orientation = simd_quatf(from: simd_float3(0, 1, 0), to: axis)
-
-            // Slightly proud of the surface, so it reads as a sleeve around
-            // the log rather than z-fighting with the points on it.
-            let sleeve = SCNCylinder(
-                radius: CGFloat(coverage.radius * 1.06),
-                height: CGFloat(coverage.axisLengthMetres)
-            )
-            sleeve.radialSegmentCount = 24
-
-            let material = SCNMaterial()
-            material.diffuse.contents = UIColor.systemGreen
-                .withAlphaComponent(0.18)
-            material.lightingModel = .constant
-            material.isDoubleSided = true
-            material.writesToDepthBuffer = false
-            sleeve.materials = [material]
-
-            let sleeveNode = SCNNode(geometry: sleeve)
-            sleeveNode.simdPosition = midpoint
-            sleeveNode.simdOrientation = orientation
-            self.highlightNode.addChildNode(sleeveNode)
-
-            self.addEndCap(
-                at: coverage.centroid + axis * coverage.minT,
-                orientation: orientation,
-                radius: coverage.radius,
-                seen: coverage.endFillStart >= 0.35
-            )
-
-            self.addEndCap(
-                at: coverage.centroid + axis * coverage.maxT,
-                orientation: orientation,
-                radius: coverage.radius,
-                seen: coverage.endFillEnd >= 0.35
-            )
-        }
-    }
-
-    /// A disc marking one end of the log: green once seen, amber while it is
-    /// still only where the points happen to stop.
-    private func addEndCap(
-        at position: simd_float3,
-        orientation: simd_quatf,
-        radius: Float,
-        seen: Bool
-    ) {
-        let disc = SCNCylinder(
-            radius: CGFloat(radius * 1.1),
-            height: 0.005
-        )
-        disc.radialSegmentCount = 24
-
-        let material = SCNMaterial()
-        material.diffuse.contents = (seen ? UIColor.systemGreen
-                                          : UIColor.systemOrange)
-            .withAlphaComponent(seen ? 0.55 : 0.35)
-        material.lightingModel = .constant
-        material.isDoubleSided = true
-        material.writesToDepthBuffer = false
-        disc.materials = [material]
-
-        let node = SCNNode(geometry: disc)
-        node.simdPosition = position
-        node.simdOrientation = orientation
-
-        highlightNode.addChildNode(node)
-    }
-
-    private func accumulate(frame: ARFrame) {
-        guard #available(iOS 14.0, *) else { return }
-
-        guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
-              let depths = DepthUnprojector.floats(from: depthData.depthMap)
+        // Everything needed is copied out here; the frame itself is released
+        // as soon as this method returns.
+        guard let payload = LidarScanView.payload(from: frame, stride: stride)
         else { return }
 
-        let confidences = depthData.confidenceMap
-            .flatMap { DepthUnprojector.confidences(from: $0) }
-
-        let width = CVPixelBufferGetWidth(depthData.depthMap)
-        let height = CVPixelBufferGetHeight(depthData.depthMap)
-
-        let intrinsics = frame.camera.intrinsics
-        let resolution = frame.camera.imageResolution
-
-        let points = DepthUnprojector.unproject(
-            depths: depths,
-            confidences: confidences,
-            width: width,
-            height: height,
-            fx: intrinsics[0][0],
-            fy: intrinsics[1][1],
-            cx: intrinsics[2][0],
-            cy: intrinsics[2][1],
-            imageWidth: Int(resolution.width),
-            imageHeight: Int(resolution.height),
-            cameraTransform: frame.camera.transform,
-            stride: accumulationStride
-        )
-
         stateLock.lock()
-        accumulator.add(points)
-        stateLock.unlock()
-    }
-
-    private func reportProgress() {
-        stateLock.lock()
-        let stats = accumulator.stats
-        let cloud = accumulator.snapshot(minSightings: 1)
-        let sweeping = isAccumulating
+        lastSentTime = now
+        sentAt = now
+        awaitingAck = true
         stateLock.unlock()
 
-        // Coverage in the log's own frame, not the world's. A bounding box
-        // grows whether the user is walking the length of the trunk or
-        // backing away from it, and says nothing about whether the two cut
-        // ends have been looked at -- which is the question that decides
-        // whether the sweep is finished.
-        let coverage = ScanCoverageAnalyser.analyse(points: cloud)
-        latestCoverage = coverage
-
-        channel.invokeMethod(
-            "progress",
-            arguments: [
-                "pointCount": stats.pointCount,
-                "frameCount": stats.frameCount,
-                "extent": Double(stats.extent),
-                "axisLengthMetres": Double(coverage.axisLengthMetres),
-                // The size measured so far, so the user can watch the figure
-                // settle instead of sweeping a grey haze and hoping. It is
-                // not the final measurement -- that is fitted properly in
-                // Dart afterwards -- but it is the same object, and seeing it
-                // is what makes the scan feel like measuring rather than
-                // waiting.
-                "radiusMetres": Double(coverage.radius),
-                "angularCoverageDegrees":
-                    Double(coverage.angularCoverageDegrees),
-                "endFillStart": Double(coverage.endFillStart),
-                "endFillEnd": Double(coverage.endFillEnd),
-                "axialBins": coverage.axialBins,
-                "trackingState": currentTrackingState,
-                // Whether a tap has landed and gathering has begun. Without
-                // this Dart cannot tell "nothing scanned yet" from "the tap
-                // never registered", and those need opposite instructions.
-                "sweeping": sweeping,
-            ]
-        )
+        DispatchQueue.main.async { [weak self] in
+            self?.channel.invokeMethod("frame", arguments: payload)
+        }
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
-        // Surfaced to Dart so the UI can offer manual entry instead of
-        // leaving the user staring at a frozen preview.
-        channel.invokeMethod(
-            "sessionFailed",
-            arguments: ["message": error.localizedDescription]
-        )
+        let message = error.localizedDescription
+
+        DispatchQueue.main.async { [weak self] in
+            self?.channel.invokeMethod(
+                "sessionFailed",
+                arguments: ["message": message]
+            )
+        }
     }
 
     func sessionWasInterrupted(_ session: ARSession) {
-        channel.invokeMethod("sessionInterrupted", arguments: nil)
+        DispatchQueue.main.async { [weak self] in
+            self?.channel.invokeMethod("sessionInterrupted", arguments: nil)
+        }
     }
 
     func sessionInterruptionEnded(_ session: ARSession) {
-        startSession()
-        channel.invokeMethod("sessionResumed", arguments: nil)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+
+            // World tracking cannot be trusted across an interruption: the
+            // phone may have moved anywhere. Dart restarts the step in
+            // progress when it hears this.
+            self.startSession()
+            self.channel.invokeMethod("sessionResumed", arguments: nil)
+        }
     }
 
-    // MARK: - Tapping
+    // MARK: - Frame payload
 
-    @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
-        let location = recognizer.location(in: sceneView)
-
-        guard let point = worldPoint(at: location) else {
-            channel.invokeMethod(
-                "tapMissed",
-                arguments: [
-                    "message": "No surface found there. Move closer to the log."
-                ]
-            )
-            return
-        }
-
-        tappedPoints.append(point)
-        addMarker(at: point)
-
-        // Picking the log is the signal to start gathering. Accumulating
-        // before this would fold in the ground the user walked over on the
-        // way to it, and there is nothing for the user to press instead.
-        stateLock.lock()
-        if !isAccumulating {
-            accumulator.reset()
-            isAccumulating = true
-            lastAccumulationTime = 0
-            lastStatsTime = 0
-            lastOverlayTime = 0
-        }
-        stateLock.unlock()
-
-        channel.invokeMethod(
-            "tapped",
-            arguments: [
-                "x": Double(point.x),
-                "y": Double(point.y),
-                "z": Double(point.z),
-                "index": tappedPoints.count - 1,
-            ]
-        )
-    }
-
-    /// Resolves a screen point to a world position using the depth-backed
-    /// raycast, falling back to estimated planes.
-    private func worldPoint(at location: CGPoint) -> simd_float3? {
-        // The depth map first, because it is the only method that works on
-        // the objects this app is for.
-        //
-        // A raycast resolves a tap by intersecting it with a *plane* ARKit
-        // has estimated, and a hit test needs feature points, which need
-        // visual texture. A log end has neither: it is small, curved, and
-        // often plain. So the tap silently missed, "No surface found there"
-        // came back, accumulation never started, and every symptom followed
-        // from that -- no guidance, no measurement, nothing to finish.
-        //
-        // The phone has a depth sensor pointed at exactly that pixel. Its
-        // reading needs no plane, no texture and no estimation.
-        if let point = depthPoint(at: location) { return point }
-
-        if #available(iOS 14.0, *) {
-            // .estimatedPlane + .any gives a result on an irregular log
-            // surface, where existing-plane raycasts would find nothing.
-            if let query = sceneView.raycastQuery(
-                from: location,
-                allowing: .estimatedPlane,
-                alignment: .any
-            ), let hit = sceneView.session.raycast(query).first {
-                let t = hit.worldTransform.columns.3
-                return simd_float3(t.x, t.y, t.z)
-            }
-        }
-
-        let results = sceneView.hitTest(
-            location,
-            types: [.featurePoint, .estimatedHorizontalPlane]
-        )
-
-        guard let hit = results.first else { return nil }
-
-        let t = hit.worldTransform.columns.3
-        return simd_float3(t.x, t.y, t.z)
-    }
-
-    /// Reads the LiDAR depth under a tapped screen point and unprojects it.
-    ///
-    /// The tap is in view coordinates; the depth map is a small image of the
-    /// same view, so the two relate by a straight proportion of width and
-    /// height. Depth is sampled over a small window and the median taken,
-    /// so one dropped or noisy return at the exact tapped pixel does not
-    /// decide where the log is.
-    private func depthPoint(at location: CGPoint) -> simd_float3? {
+    /// Everything Dart needs from one frame, as plain channel types.
+    private static func payload(
+        from frame: ARFrame,
+        stride: Int
+    ) -> [String: Any]? {
         guard #available(iOS 14.0, *) else { return nil }
 
-        stateLock.lock()
-        let frameOrNil = latestFrame
-        stateLock.unlock()
-
-        guard let frame = frameOrNil,
-              let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
-              let depths = DepthUnprojector.floats(from: depthData.depthMap)
+        guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth
         else { return nil }
 
-        let width = CVPixelBufferGetWidth(depthData.depthMap)
-        let height = CVPixelBufferGetHeight(depthData.depthMap)
-
-        guard width > 0, height > 0, depths.count >= width * height else {
-            return nil
-        }
-
-        let bounds = sceneView.bounds
-        guard bounds.width > 0, bounds.height > 0 else { return nil }
-
-        let u = Float(location.x / bounds.width)
-        let v = Float(location.y / bounds.height)
-
-        guard u >= 0, u <= 1, v >= 0, v <= 1 else { return nil }
-
-        let centreX = Int(u * Float(width - 1))
-        let centreY = Int(v * Float(height - 1))
-
-        var samples: [Float] = []
-
-        for dy in -2...2 {
-            for dx in -2...2 {
-                let x = centreX + dx
-                let y = centreY + dy
-
-                guard x >= 0, x < width, y >= 0, y < height else { continue }
-
-                let depth = depths[y * width + x]
-
-                // Beyond the sensor's useful range, or no return at all.
-                guard depth.isFinite, depth > 0.05, depth < 5 else { continue }
-
-                samples.append(depth)
-            }
-        }
-
-        guard samples.count >= 3 else { return nil }
-
-        samples.sort()
-        let depth = samples[samples.count / 2]
-
-        // Unproject through the camera intrinsics, scaled from the
-        // full-resolution image the intrinsics describe down to the depth
-        // map's own size.
-        let intrinsics = frame.camera.intrinsics
-        let resolution = frame.camera.imageResolution
-
-        let scaleX = Float(width) / Float(resolution.width)
-        let scaleY = Float(height) / Float(resolution.height)
-
-        let fx = intrinsics[0][0] * scaleX
-        let fy = intrinsics[1][1] * scaleY
-        let cx = intrinsics[2][0] * scaleX
-        let cy = intrinsics[2][1] * scaleY
-
-        guard fx > 0, fy > 0 else { return nil }
-
-        // ARKit's camera space looks down -Z, with +Y up the image, so the
-        // vertical term is negated against the pixel row.
-        let cameraPoint = simd_float4(
-            (Float(centreX) - cx) / fx * depth,
-            -(Float(centreY) - cy) / fy * depth,
-            -depth,
-            1
-        )
-
-        let world = frame.camera.transform * cameraPoint
-
-        return simd_float3(world.x, world.y, world.z)
-    }
-
-    private func addMarker(at position: simd_float3) {
-        let sphere = SCNSphere(radius: 0.01)
-        let material = SCNMaterial()
-        material.diffuse.contents = UIColor.systemGreen
-        material.lightingModel = .constant
-        sphere.materials = [material]
-
-        let node = SCNNode(geometry: sphere)
-        node.simdPosition = position
-        node.name = "marker"
-
-        sceneView.scene.rootNode.addChildNode(node)
-    }
-
-    private func clearMarkers() {
-        sceneView.scene.rootNode.childNodes
-            .filter { $0.name == "marker" }
-            .forEach { $0.removeFromParentNode() }
-
-        tappedPoints.removeAll()
-        capturedNode.geometry = nil
-        highlightNode.childNodes.forEach { $0.removeFromParentNode() }
-
-        // Starting over means starting over: a cloud gathered around the
-        // previous pick must not survive into the next measurement.
-        stateLock.lock()
-        isAccumulating = false
-        accumulator.reset()
-        stateLock.unlock()
-    }
-
-    // MARK: - Channel
-
-    private func handle(
-        _ call: FlutterMethodCall,
-        result: @escaping FlutterResult
-    ) {
-        switch call.method {
-        case "clearTaps":
-            clearMarkers()
-            result(nil)
-
-        case "startSweep":
-            stateLock.lock()
-            accumulator.reset()
-            isAccumulating = true
-            lastAccumulationTime = 0
-            lastStatsTime = 0
-            lastOverlayTime = 0
-            stateLock.unlock()
-            result(nil)
-
-        case "stopSweep":
-            stateLock.lock()
-            isAccumulating = false
-            stateLock.unlock()
-            result(nil)
-
-        case "capture":
-            capture(result: result)
-
-        default:
-            result(FlutterMethodNotImplemented)
-        }
-    }
-
-    /// Returns the cloud accumulated over the sweep, in world space.
-    ///
-    /// The whole cloud crosses the channel once per measurement rather than
-    /// streaming frames. All geometry -- segmentation, circle fitting, axis
-    /// refinement, quality gates -- happens in Dart, where it can be tested
-    /// without a device.
-    ///
-    /// Falls back to the single most recent frame when nothing was
-    /// accumulated, so a user who taps and immediately finishes still gets a
-    /// measurement (the quality gate will judge it) instead of an error.
-    private func capture(result: @escaping FlutterResult) {
-        stateLock.lock()
-        let frameOrNil = latestFrame
-        stateLock.unlock()
-
-        guard let frame = frameOrNil else {
-            result(
-                FlutterError(
-                    code: "NO_FRAME",
-                    message: "The camera has not produced a frame yet.",
-                    details: nil
-                )
-            )
-            return
-        }
-
-        guard #available(iOS 14.0, *) else {
-            result(
-                FlutterError(
-                    code: "UNSUPPORTED",
-                    message: "Depth capture requires iOS 14 or later.",
-                    details: nil
-                )
-            )
-            return
-        }
-
-        stateLock.lock()
-        var points = accumulator.snapshot()
-        let frameCount = accumulator.frameCount
-        stateLock.unlock()
-
-        if points.isEmpty {
-            guard let single = singleFramePoints(frame: frame) else {
-                result(
-                    FlutterError(
-                        code: "NO_DEPTH",
-                        message:
-                            "No depth data. This device may not have LiDAR.",
-                        details: nil
-                    )
-                )
-                return
-            }
-            points = single
-        }
-
-        // Flatten to xyz triples: a typed buffer crosses the channel far
-        // more cheaply than a list of dictionaries.
-        var flat = [Float32]()
-        flat.reserveCapacity(points.count * 3)
-        for p in points {
-            flat.append(p.x)
-            flat.append(p.y)
-            flat.append(p.z)
-        }
-
-        var taps = [Float32]()
-        for p in tappedPoints {
-            taps.append(p.x)
-            taps.append(p.y)
-            taps.append(p.z)
-        }
-
-        result([
-            "points": FlutterStandardTypedData(float32: Data(
-                bytes: flat, count: flat.count * MemoryLayout<Float32>.size
-            )),
-            "taps": FlutterStandardTypedData(float32: Data(
-                bytes: taps, count: taps.count * MemoryLayout<Float32>.size
-            )),
-            "pointCount": points.count,
-            "frameCount": frameCount,
-            "trackingState": trackingStateName(frame.camera.trackingState),
-        ])
-    }
-
-    /// One frame's depth, used only when the sweep produced nothing.
-    private func singleFramePoints(frame: ARFrame) -> [simd_float3]? {
-        guard #available(iOS 14.0, *) else { return nil }
-
-        guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
-              let depths = DepthUnprojector.floats(from: depthData.depthMap)
-        else { return nil }
-
-        let confidences = depthData.confidenceMap
-            .flatMap { DepthUnprojector.confidences(from: $0) }
+        guard let grid = decimate(
+            depth: depthData.depthMap,
+            confidence: depthData.confidenceMap,
+            stride: stride
+        ) else { return nil }
 
         let intrinsics = frame.camera.intrinsics
         let resolution = frame.camera.imageResolution
 
-        return DepthUnprojector.unproject(
-            depths: depths,
-            confidences: confidences,
-            width: CVPixelBufferGetWidth(depthData.depthMap),
-            height: CVPixelBufferGetHeight(depthData.depthMap),
-            fx: intrinsics[0][0],
-            fy: intrinsics[1][1],
-            cx: intrinsics[2][0],
-            cy: intrinsics[2][1],
-            imageWidth: Int(resolution.width),
-            imageHeight: Int(resolution.height),
-            cameraTransform: frame.camera.transform
-        )
+        // Column-major, as simd stores it and as Dart's Matrix4 reads it --
+        // the buffer crosses with no transpose on either side.
+        let t = frame.camera.transform
+        let transform: [Float32] = [
+            t.columns.0.x, t.columns.0.y, t.columns.0.z, t.columns.0.w,
+            t.columns.1.x, t.columns.1.y, t.columns.1.z, t.columns.1.w,
+            t.columns.2.x, t.columns.2.y, t.columns.2.z, t.columns.2.w,
+            t.columns.3.x, t.columns.3.y, t.columns.3.z, t.columns.3.w,
+        ]
+
+        var payload: [String: Any] = [
+            "width": grid.width,
+            "height": grid.height,
+            "depths": typedFloats(grid.depths),
+            // Intrinsics of the full captured image, exactly as ARKit reports
+            // them. Dart rescales them to the depth grid, where that rescale
+            // is tested.
+            "imageWidth": Int(resolution.width),
+            "imageHeight": Int(resolution.height),
+            "fx": Double(intrinsics[0][0]),
+            "fy": Double(intrinsics[1][1]),
+            "cx": Double(intrinsics[2][0]),
+            "cy": Double(intrinsics[2][1]),
+            "transform": typedFloats(transform),
+            "tracking": trackingName(frame.camera.trackingState),
+            "trackingReason": trackingReason(frame.camera.trackingState),
+            "timestamp": frame.timestamp,
+        ]
+
+        if let confidence = grid.confidence {
+            payload["confidence"] = FlutterStandardTypedData(
+                bytes: Data(confidence)
+            )
+        }
+
+        return payload
     }
 
-    private func trackingStateName(
+    /// Copies every Nth pixel of the depth map, and the confidence map
+    /// alongside it, in a single pass.
+    ///
+    /// Row by row through the buffer's own stride: the rows are padded, so a
+    /// flat copy would interleave padding bytes into the depths.
+    private static func decimate(
+        depth: CVPixelBuffer,
+        confidence: CVPixelBuffer?,
+        stride: Int
+    ) -> (depths: [Float32], confidence: [UInt8]?, width: Int, height: Int)? {
+        CVPixelBufferLockBaseAddress(depth, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depth, .readOnly) }
+
+        guard CVPixelBufferGetPixelFormatType(depth)
+                == kCVPixelFormatType_DepthFloat32,
+              let base = CVPixelBufferGetBaseAddress(depth)
+        else { return nil }
+
+        let width = CVPixelBufferGetWidth(depth)
+        let height = CVPixelBufferGetHeight(depth)
+        let rowBytes = CVPixelBufferGetBytesPerRow(depth)
+
+        let step = max(1, stride)
+        let outWidth = width / step
+        let outHeight = height / step
+
+        guard outWidth >= 8, outHeight >= 8 else { return nil }
+
+        var depths = [Float32](repeating: 0, count: outWidth * outHeight)
+
+        for row in 0..<outHeight {
+            let source = base.advanced(by: row * step * rowBytes)
+                .assumingMemoryBound(to: Float32.self)
+
+            for col in 0..<outWidth {
+                depths[row * outWidth + col] = source[col * step]
+            }
+        }
+
+        var confidences: [UInt8]? = nil
+
+        if let confidence {
+            CVPixelBufferLockBaseAddress(confidence, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(confidence, .readOnly) }
+
+            if CVPixelBufferGetWidth(confidence) == width,
+               CVPixelBufferGetHeight(confidence) == height,
+               let confidenceBase = CVPixelBufferGetBaseAddress(confidence) {
+                let confidenceRowBytes =
+                    CVPixelBufferGetBytesPerRow(confidence)
+
+                var values = [UInt8](
+                    repeating: 0, count: outWidth * outHeight
+                )
+
+                for row in 0..<outHeight {
+                    let source = confidenceBase
+                        .advanced(by: row * step * confidenceRowBytes)
+                        .assumingMemoryBound(to: UInt8.self)
+
+                    for col in 0..<outWidth {
+                        values[row * outWidth + col] = source[col * step]
+                    }
+                }
+
+                confidences = values
+            }
+        }
+
+        return (depths, confidences, outWidth, outHeight)
+    }
+
+    private static func typedFloats(
+        _ values: [Float32]
+    ) -> FlutterStandardTypedData {
+        let data = values.withUnsafeBufferPointer { Data(buffer: $0) }
+        return FlutterStandardTypedData(float32: data)
+    }
+
+    private static func trackingName(
         _ state: ARCamera.TrackingState
     ) -> String {
         switch state {
@@ -805,8 +327,186 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
         }
     }
 
+    /// Why tracking is limited, so Dart can say "move slower" rather than a
+    /// generic "hold on".
+    private static func trackingReason(
+        _ state: ARCamera.TrackingState
+    ) -> String {
+        guard case .limited(let reason) = state else { return "" }
+
+        switch reason {
+        case .initializing: return "initializing"
+        case .excessiveMotion: return "excessiveMotion"
+        case .insufficientFeatures: return "insufficientFeatures"
+        case .relocalizing: return "relocalizing"
+        @unknown default: return "unknown"
+        }
+    }
+
+    // MARK: - Markers
+
+    /// Draws a disc on a log end the scan has locked onto.
+    ///
+    /// The user's proof that the app found the right thing. Walking to the
+    /// far end they can look back and see it still sitting on the end they
+    /// scanned; if it is floating in the air, they know before the number
+    /// comes out wrong rather than after.
+    private func showMarker(
+        id: String,
+        position: simd_float3,
+        normal: simd_float3,
+        radius: Float
+    ) {
+        let name = "marker:\(id)"
+
+        sceneView.scene.rootNode.childNodes
+            .filter { $0.name == name }
+            .forEach { $0.removeFromParentNode() }
+
+        let disc = SCNCylinder(radius: CGFloat(radius), height: 0.004)
+        disc.radialSegmentCount = 48
+
+        let material = SCNMaterial()
+        material.diffuse.contents = UIColor.systemGreen
+            .withAlphaComponent(0.45)
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        material.writesToDepthBuffer = false
+        disc.materials = [material]
+
+        let node = SCNNode(geometry: disc)
+        node.name = name
+        node.simdPosition = position
+
+        // SceneKit builds a cylinder up its own Y axis; turn it onto the
+        // face's normal so the disc lies flat on the end.
+        let length = simd_length(normal)
+        if length > 1e-6 {
+            node.simdOrientation = simd_quatf(
+                from: simd_float3(0, 1, 0),
+                to: normal / length
+            )
+        }
+
+        sceneView.scene.rootNode.addChildNode(node)
+    }
+
+    private func clearMarkers() {
+        sceneView.scene.rootNode.childNodes
+            .filter { $0.name?.hasPrefix("marker:") == true }
+            .forEach { $0.removeFromParentNode() }
+    }
+
+    // MARK: - Channel
+
+    /// Flutter calls this on the main thread.
+    private func handle(
+        _ call: FlutterMethodCall,
+        result: @escaping FlutterResult
+    ) {
+        let args = call.arguments as? [String: Any]
+
+        switch call.method {
+        case "start":
+            stateLock.lock()
+            if let requested = LidarScanView.int(args?["decimation"]),
+               [1, 2, 4].contains(requested) {
+                decimation = requested
+            }
+            if let ms = LidarScanView.int(args?["intervalMs"]), ms >= 30 {
+                frameInterval = Double(ms) / 1000
+            }
+            isStreaming = true
+            awaitingAck = false
+            lastSentTime = 0
+            stateLock.unlock()
+
+            // A scan is a minute of holding the phone still; the screen
+            // dimming halfway through reads as the app having frozen.
+            UIApplication.shared.isIdleTimerDisabled = true
+            result(nil)
+
+        case "stop":
+            stateLock.lock()
+            isStreaming = false
+            awaitingAck = false
+            stateLock.unlock()
+
+            UIApplication.shared.isIdleTimerDisabled = false
+            result(nil)
+
+        case "ack":
+            stateLock.lock()
+            awaitingAck = false
+            stateLock.unlock()
+            result(nil)
+
+        case "restartTracking":
+            clearMarkers()
+            startSession()
+            result(nil)
+
+        case "showMarker":
+            guard let id = args?["id"] as? String,
+                  let x = LidarScanView.float(args?["x"]),
+                  let y = LidarScanView.float(args?["y"]),
+                  let z = LidarScanView.float(args?["z"]),
+                  let nx = LidarScanView.float(args?["nx"]),
+                  let ny = LidarScanView.float(args?["ny"]),
+                  let nz = LidarScanView.float(args?["nz"]),
+                  let radius = LidarScanView.float(args?["radius"]),
+                  radius > 0
+            else {
+                result(nil)
+                return
+            }
+
+            showMarker(
+                id: id,
+                position: simd_float3(x, y, z),
+                normal: simd_float3(nx, ny, nz),
+                radius: radius
+            )
+            result(nil)
+
+        case "clearMarkers":
+            clearMarkers()
+            result(nil)
+
+        case "speak":
+            if let text = args?["text"] as? String, !text.isEmpty {
+                // A new milestone replaces an old one rather than queueing
+                // behind it; a stale "walk to the other end" spoken after the
+                // scan finished would be worse than silence.
+                if speech.isSpeaking {
+                    speech.stopSpeaking(at: .immediate)
+                }
+                speech.speak(AVSpeechUtterance(string: text))
+            }
+            result(nil)
+
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    private static func float(_ value: Any?) -> Float? {
+        guard let number = value as? NSNumber else { return nil }
+        let result = number.floatValue
+        return result.isFinite ? result : nil
+    }
+
+    private static func int(_ value: Any?) -> Int? {
+        (value as? NSNumber)?.intValue
+    }
+
     deinit {
+        channel.setMethodCallHandler(nil)
         sceneView.session.pause()
+
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
 }
 

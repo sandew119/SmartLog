@@ -95,7 +95,7 @@ class _ScanLogScreenState extends State<ScanLogScreen> {
                 Text(
                   _depthAvailable
                       ? "This device has a depth sensor. Point it at a log to "
-                          "measure its diameter and length automatically."
+                          "measure its girth and length automatically."
                       : "This device doesn't have a depth sensor, so logs are "
                           "measured by entering dimensions by hand. Everything "
                           "else — stacks, volumes and reports — works the same.",

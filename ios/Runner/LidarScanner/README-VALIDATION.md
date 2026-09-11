@@ -1,151 +1,146 @@
-# LiDAR Scanner — Build & Validation Guide
+# LiDAR Scanner — Device Validation Guide
 
-This module was written **without access to a Mac, Xcode, or a LiDAR
-device**. None of the Swift in this folder has ever been compiled or run.
-Treat every measurement it produces as unverified until the checks below
-pass, in order.
+The scanner was written on Windows, without a Mac or a LiDAR device. The
+Swift in this folder has **not been compiled**. Everything that decides a
+measurement is in Dart and **is** tested (see the end of this file), so the
+device work is about checking two things: that the native pump delivers
+frames, and that real depth matches the synthetic depth the tests use.
 
-You need: a Mac with Xcode, and an iPhone 12 Pro (or later Pro) / LiDAR
-iPad. Non-Pro iPhones have no LiDAR and will correctly report the feature as
-unavailable — the app falls back to manual entry and everything else works.
+Target device used for the first field test: **iPhone 13 Pro**.
 
 ---
 
-## 1. Add the files to the Xcode project
+## How the scan works (so you know what to look for)
 
-The four `.swift` files here are **not yet referenced by
-`Runner.xcodeproj`** — adding them requires four coordinated edits with
-freshly generated UUIDs, which is the single most likely place to lose an
-hour. Do it through the UI instead:
+1. **Cut end.** The user points at one sawn end. The app grows a region out
+   from the middle of the screen, fits a plane to it, and traces its outline
+   all the way round. When several frames agree, it says *"Face scan
+   complete"*, buzzes, and puts a green disc on the end.
+2. **Walk.** The user walks to the other end. Each frame, the app reads how
+   wide the trunk is from the two lines of sight that just graze its edges.
+3. **Other end.** Turning to face the far end is enough — the app notices
+   it, traces it, says *"Length complete"*. Length is the straight line
+   between the two end centres.
 
-1. Open `ios/Runner.xcworkspace` (the workspace, not the `.xcodeproj`).
-2. Drag the `LidarScanner` folder onto the `Runner` group in the navigator.
-3. Tick **Copy items if needed = off**, **Create groups**, and
-   **Add to targets: Runner**.
-4. Build (⌘B).
+Girth along the trunk comes from Cauchy's formula: at the cut end the whole
+outline is visible, so its girth ÷ its width (seen from the side) is known,
+and that ratio turns each trunk width into a girth. The trunk can only
+*lower* the billed girth, and only when a thin spot is corroborated and
+clearly below the thinner end.
 
-If Xcode ever reports the project "cannot be parsed", run
-`git checkout ios/Runner.xcodeproj/project.pbxproj` and redo this step.
+## 1. Build
 
-No Podfile changes are needed — this project uses Swift Package Manager, and
-`import ARKit` links the system frameworks automatically.
+The Xcode target already references `LidarCapability.swift`,
+`DepthUnprojector.swift`, `LidarScanView.swift`, `LidarScannerPlugin.swift`
+and `DepthAccumulator.swift`. The plugin is registered in `AppDelegate.swift`.
 
-## 2. Register the plugin
+- `ScanCoverageAnalyser.swift` has been **deleted**. It was never in the
+  Xcode target, yet the old `LidarScanView` called it — on its own that
+  would have stopped the build.
+- `DepthAccumulator.swift` is no longer used. It is left in the target
+  because it compiles on its own and removing it means hand-editing the
+  project file. Delete it through Xcode when convenient.
+- Deployment target is iOS 13; depth is iOS 14+, so every depth call sits
+  behind `#available(iOS 14.0, *)`.
 
-In `ios/Runner/AppDelegate.swift`, alongside `GeneratedPluginRegistrant`:
+If the build fails in `LidarScanView.swift`, that file is the one to fix —
+it is a thin pump and has no logic worth preserving.
 
-```swift
-if let registrar = registrar(forPlugin: "LidarScannerPlugin") {
-    LidarScannerPlugin.register(with: registrar)
-}
-```
+## 2. Frames are flowing
 
-Verify: run the app, open **Scan Log**. On a LiDAR device the screen should
-say a depth sensor was found. If it still says "no depth sensor", the plugin
-is not registered — nothing further will work until this is right.
+Open **Scan Log**. The banner should change within a second from
+*"Starting the camera…"* to *"Point at the cut end"*.
 
-## 3. Flat-wall check — **do this before trusting anything else**
+- Stuck on *"Starting the camera…"*: Dart is receiving no frames. Check the
+  Xcode console for channel errors, and that `start` reaches
+  `LidarScanView.handle`.
+- Stuck on *"Getting ready…"*: ARKit tracking never became normal. Move the
+  phone slowly; show it some texture (ground, bark).
 
-This is the milestone that catches the most likely blind-code bug: the
-camera convention and the intrinsics scaling in `DepthUnprojector.swift`.
-Both can be wrong while still producing a plausible-looking cloud (right
-point count, finite values, roughly sane magnitudes) that is
-systematically warped.
+The old scanner sent messages from the ARKit queue instead of the main
+thread, which Flutter rejects. The new one sends everything on the main
+thread and waits for Dart to acknowledge each frame before sending the
+next, so frames are dropped rather than queued.
 
-1. Stand **exactly 1.00 m** from a large flat wall, phone square to it
-   (measure with a tape; a metre is not something to eyeball).
-2. Capture.
-3. Check the returned points:
-   - they should form a **plane**, not a bowl or a saddle;
-   - every point should be within a couple of centimetres of **1.00 m**
-     from the camera;
-   - the plane's normal should point back at the phone.
+## 3. Known circle — checks the depth maths
 
-**If the points curve, or the distance is consistently off by a scale
-factor, STOP.** The intrinsics scaling is wrong. A scale error here becomes
-a squared error in volume, so no log measurement means anything until this
-reads true. Re-check `scaleX`/`scaleY` in `DepthUnprojector.unproject`
-against the actual `imageResolution` and depth-map dimensions.
+Use something round with a known circumference: a bucket lid, a paint tin,
+a plate. Wrap a tape round it.
 
-## 4. Known cylinder
+Stand it up with open space behind it, point at it from about 60 cm, and
+let it lock. Compare the girth on screen with the tape. Do this 5 times.
 
-Get a length of PVC pipe and measure its diameter with calipers.
+- **Right within ~2%**: the unprojection and the intrinsics rescale are
+  correct.
+- **Off by the same factor every time**: the intrinsics scaling is wrong.
+  Look at `DepthFrame.fromNative`, and check the `imageWidth`/`imageHeight`
+  and the decimated `width`/`height` in the payload.
+- **Never locks**: read the banner. Each message maps to one rejection in
+  `FaceScanner.detect` (see the table below).
 
-Scan it square-on at **0.5, 1.0, 1.5, 2.0 and 3.0 m**, ten times at each
-distance. Record app value vs. truth.
+## 4. A real log
 
-Produce a table of **bias and standard deviation per distance**. Those
-numbers — not guesses — are what the thresholds in
-`lib/models/log_measurement.dart` should be set from. They are all gathered
-in one block there for exactly this reason.
+Tape the girth at both cut ends, and the straight length end to end. Scan
+the same log 5 times. Record app vs tape for:
 
-Proposed acceptance criterion (adjust if you have a trade standard):
-**diameter within ±2% or ±5 mm, whichever is larger, at 1 m square-on, 95%
-of the time.**
+- girth, first end
+- girth, other end
+- thinnest girth (and where the app says it was)
+- length
 
-## 5. Off-square angles
+Acceptance to aim for: **girth within ±2%, length within ±2 cm per metre**.
 
-Same pipe at **30°, 45° and 60°** off square. This quantifies the penalty
-from seeing a narrower arc of the surface, and validates the angular-span
-gate (`LogGeometry.minAngularSpanRadians`, currently 110°). If good scans
-are being rejected at 45°, the gate is too tight; if bad ones sail through
-at 60°, it's too loose.
+## 5. Conditions
 
-## 6. A real log
-
-Chalk a line around a log at one section. Measure its girth there with a
-tape, convert to diameter, and scan the same marked section. Repeat on
-several logs of different species and sizes.
-
-This is where the **trade-convention question** becomes real: the app takes
-the **minimum** diameter along the log ("thinnest place"), while classical
-Hoppus tables use **mid-length** girth. If the app reads consistently low
-against the book, that is this convention difference, not a sensor error.
-The full diameter profile is stored with every log, so the convention can be
-changed later without re-scanning anything.
-
-## 7. Environment matrix
-
-iPhone LiDAR is infrared. Timber yards are outdoors. Test all of:
-
-| Condition | Why it matters |
+| Condition | What to check |
 |---|---|
-| Deep shade | Baseline — best case |
-| Direct midday sun | **Biggest commercial risk.** Sunlight swamps the IR return |
-| Dry bark vs. wet bark | Wet dark bark absorbs IR badly |
-| Pale vs. dark species | Reflectivity changes return strength |
-| Single log vs. stacked pile | Tests the radial gate against neighbours |
+| Shade vs direct sun | Sun blinds the IR sensor — does it still lock? |
+| Standing off to one side | Should ask to face it straight, then accept after ~3.5 s |
+| Log in a stack, ends flush | Should say *"Aim at one log only"*, not report a double girth |
+| Log in a stack, ends staggered | Should measure normally |
+| Far end buried or rotten | *"Can't scan this end?"* ends the length where the user pointed |
+| Very long log (4 m+) | Length drift — compare with tape |
 
-Record which combinations fail and how they fail. The app already reports a
-limiting factor in plain language; make sure the message actually matches
-the real cause in each case.
+## Banner → cause
 
-## 8. Send scans back
+| Banner | Rejection | Meaning |
+|---|---|---|
+| Point at the cut end | `noDepth` / `notFlat` | No usable surface, or the surface is rough/curved |
+| Move closer | `tooFar` / `tooSmall` | Beyond 2.5 m, or too few pixels on the end |
+| Move back a little | `tooClose` | Inside 25 cm |
+| Step back | `runsOffScreen` | The end runs off the edge of the frame |
+| That is the side of the log | `pointingAtTheSide` | A long band — the trunk, not the end |
+| Face the cut end straight on | `tooAngled` | More than 45° off square |
+| Aim at one log only | `moreThanOneLog` | Outline not compact — two ends touching |
+| Hold still… | `outlineIncomplete` / settling | Waiting for frames to agree |
 
-Every capture should be dumped and returned so they can become permanent
-offline regression fixtures. A real point cloud from a real log, replayed on
-a Windows machine, is worth far more than any synthetic test — it turns
-on-device reality into something testable without a device.
+## Tuning
 
----
+Every threshold is a named constant with its reasoning beside it:
 
-## What is already verified (and what isn't)
+- `lib/utils/face_scan.dart` — `FaceScanner`: range, flatness, tilt,
+  compactness, outline completeness.
+- `lib/utils/log_scan_session.dart` — `LogScanSession`: how many frames
+  must agree, how long before an angled face is accepted, far-end matching.
+- `lib/utils/log_girth_model.dart` — `TrunkProfiler`, `LogGirthModel`:
+  slice sizes, the margin before the trunk can undercut an end.
 
-**Verified on Windows, 100+ passing tests:**
-- All geometry — Taubin circle fitting, RANSAC outlier rejection, axis
-  refinement, median-smoothed minimum — against synthetic cylinders with
-  noise, partial arcs (180°/120°/90°/60°), oblique seed axes, neighbouring
-  logs, and taper. See `test/log_geometry_test.dart`.
-- Unit conversions, the deduction pipeline, preference storage.
-- The channel decoder against missing/mistyped/NaN/truncated payloads —
-  written specifically because this native side is unverified. See
-  `test/lidar_scanner_service_test.dart`.
-- The whole scan screen, driven by a fake measurement source.
+## What is verified off-device
 
-**Not verified — needs this device:**
-- That the Xcode project builds at all.
-- **The camera convention and intrinsics scaling** (step 3 above).
-- ARSession lifecycle: permissions, interruption, thermal throttling.
-- PlatformView embedding, z-ordering, and gesture arbitration between the
-  Flutter overlay and the `UiKitView`.
-- Absolute accuracy against a tape measure.
+Run `flutter test`. The scanner's tests render synthetic depth frames of
+known scenes and check the answers against geometry worked out
+independently:
+
+- `test/face_scan_test.dart` — round, oval, lobed and tilted ends traced
+  within 2–4% of their true girth; the trunk, an oversized end, an empty
+  scene, a far end and two touching ends all refused with the right reason.
+- `test/log_girth_model_test.dart` — round and oval logs, a waist, taper,
+  noise that must not undercut an end, and trunk widths read from rendered
+  depth within 1.5% on average.
+- `test/log_scan_session_test.dart` — a whole scan driven frame by frame:
+  locks on, walks, finds the far end, finishes on its own; length within
+  2 cm; wrong-end rejection; marking the far end by eye.
+
+**Not verified — needs the device:** that the Swift compiles; that ARKit's
+depth, intrinsics and pose behave as the payload assumes; frame rate and
+heat on a long scan; accuracy against a tape.

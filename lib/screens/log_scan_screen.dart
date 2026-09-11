@@ -438,12 +438,36 @@ class _LogScanScreenState extends State<LogScanScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            _statRow("Girth (thinnest)", measurement.girthDisplay),
+            // The two-end scan measures each cut end all the way round, and
+            // those are the figures a buyer can check with a tape in seconds,
+            // so they are shown alongside the thinnest girth the price uses.
+            if (measurement.faceGirthInches case final face?)
+              _statRow("Girth, first end", UnitDisplay.across(face)),
+            if (measurement.isEndToEndScan)
+              _statRow(
+                "Girth, other end",
+                measurement.farFaceGirthInches == null
+                    ? "Not scanned"
+                    : UnitDisplay.across(measurement.farFaceGirthInches!),
+              ),
             _statRow(
-              "Diameter",
-              UnitDisplay.across(measurement.minDiameterInches),
+              measurement.isEndToEndScan ? "Thinnest girth" : "Girth (thinnest)",
+              measurement.girthDisplay,
             ),
-            _statRow("Length", UnitDisplay.length(measurement.lengthFeet)),
+            // Only for a round-log fit. For the two-end scan a diameter is
+            // an equivalent circle nobody measured, shown beside girths that
+            // were -- it would only invite the question of which is right.
+            if (!measurement.isEndToEndScan)
+              _statRow(
+                "Diameter",
+                UnitDisplay.across(measurement.minDiameterInches),
+              ),
+            _statRow(
+              measurement.lengthEstimated
+                  ? "Length (estimated)"
+                  : (measurement.isEndToEndScan ? "Length, end to end" : "Length"),
+              UnitDisplay.length(measurement.lengthFeet),
+            ),
             if (deduction > 0)
               _statRow(
                 "After deduction",
