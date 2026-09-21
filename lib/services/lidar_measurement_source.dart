@@ -29,7 +29,8 @@ class LidarMeasurementSource implements MeasurementSource {
   @override
   List<String> get guidance => const [
         "Stand about one step from the log's cut end and point the phone at "
-            "it. Hold still — the app finds the end by itself and says when "
+            "it, or tap the end you want if there are several in view. Hold "
+            "still — the app draws round the end as it measures, and says when "
             "it is done.",
         "Walk to the other end, keeping the log in the middle of the screen.",
         "Point at the other cut end. The length is measured in a straight "

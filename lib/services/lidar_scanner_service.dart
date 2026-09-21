@@ -126,6 +126,73 @@ class LidarScannerService {
     } catch (_) {}
   }
 
+  /// Draws a ribbon on the log -- the outline being measured -- in world
+  /// space, so it stays on the end as the phone moves. [vertices] is the flat
+  /// `x y z` strip from `OutlineRibbon.strip`.
+  Future<void> showOutline(
+    int viewId, {
+    required String id,
+    required Float32List vertices,
+    required double red,
+    required double green,
+    required double blue,
+    double alpha = 0.9,
+  }) async {
+    if (vertices.length < 12) return;
+
+    try {
+      await _view(viewId).invokeMethod<void>("showOutline", {
+        "id": id,
+        "vertices": vertices,
+        "r": red,
+        "g": green,
+        "b": blue,
+        "a": alpha,
+      });
+    } catch (_) {}
+  }
+
+  Future<void> clearOutline(int viewId, String id) async {
+    try {
+      await _view(viewId).invokeMethod<void>("clearOutline", {"id": id});
+    } catch (_) {}
+  }
+
+  /// Where a tap on the view lands in the camera image, as fractions of the
+  /// image (0..1 across, 0..1 down), or null if it cannot be resolved.
+  ///
+  /// [x] and [y] are fractions of the view. The native side asks ARKit for the
+  /// mapping, which accounts for the way the image is rotated and cropped to
+  /// fill the screen; the depth map is the same picture, so the answer is a
+  /// position in it too.
+  Future<({double u, double v})?> viewToImage(
+    int viewId, {
+    required double x,
+    required double y,
+  }) async {
+    try {
+      final result = await _view(viewId).invokeMethod<Map<Object?, Object?>>(
+        "viewToImage",
+        {"x": x, "y": y},
+      );
+
+      final u = result?["u"];
+      final v = result?["v"];
+
+      if (u is! num || v is! num) return null;
+
+      final du = u.toDouble();
+      final dv = v.toDouble();
+
+      if (!du.isFinite || !dv.isFinite) return null;
+      if (du < 0 || du > 1 || dv < 0 || dv > 1) return null;
+
+      return (u: du, v: dv);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> clearMarkers(int viewId) async {
     try {
       await _view(viewId).invokeMethod<void>("clearMarkers");

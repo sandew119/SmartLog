@@ -60,9 +60,9 @@ void main() {
   }
 
   /// Past the far end, turned round to face it.
-  frameAtFarEnd() {
+  frameAtFarEnd({double sideways = 0}) {
     final camera = SyntheticCamera(
-      transform: Matrix4.translationValues(0, 0, -1.2 - length)
+      transform: Matrix4.translationValues(sideways, 0, -1.2 - length)
         ..rotateY(math.pi),
     );
 
@@ -203,8 +203,10 @@ void main() {
     test('asks for square-on first, then accepts a steady angle anyway', () {
       final session = LogScanSession();
 
-      // 40 degrees: inside what the detector accepts, outside square.
-      final tilt = 40 * math.pi / 180;
+      // 58 degrees: past what counts as square, inside what the detector
+      // accepts. 40 used to be the awkward case; it no longer is, because a
+      // person standing a metre from a vertical end is already at about 50.
+      final tilt = 58 * math.pi / 180;
 
       ScanEvent? event;
       var frames = 0;
@@ -226,6 +228,65 @@ void main() {
         frames * 0.1,
         greaterThanOrEqualTo(LogScanSession.patienceSeconds),
       );
+    });
+
+    test('an ordinary stance, 40 degrees off square, locks at once', () {
+      final session = LogScanSession();
+
+      ScanEvent? event;
+      var frames = 0;
+
+      while (event == null && frames < 20) {
+        event =
+            session.onFrame(frameAtNearEnd(tiltRadians: 40 * math.pi / 180));
+        frames++;
+      }
+
+      expect(event, ScanEvent.nearEndLocked);
+      expect(frames, lessThanOrEqualTo(4));
+    });
+
+    test('locks within a third of a second of a steady aim', () {
+      final session = LogScanSession();
+
+      ScanEvent? event;
+      var frames = 0;
+
+      while (event == null && frames < 10) {
+        event = session.onFrame(frameAtNearEnd());
+        frames++;
+      }
+
+      expect(event, ScanEvent.nearEndLocked);
+      expect(frames, LogScanSession.lockReadings);
+    });
+
+    test('a frame that finds nothing does not restart the count', () {
+      final session = LogScanSession();
+
+      session.onFrame(frameAtNearEnd());
+      session.onFrame(frameAtNearEnd());
+
+      // The camera swings away for a moment...
+      session.onFrame(frameAlongside(1.0));
+
+      // ...and back. One more good reading finishes it.
+      expect(session.onFrame(frameAtNearEnd()), ScanEvent.nearEndLocked);
+    });
+
+    test('the progress ring fills as readings agree', () {
+      final session = LogScanSession();
+
+      expect(session.lockProgress, 0);
+
+      session.onFrame(frameAtNearEnd());
+      final one = session.lockProgress;
+
+      session.onFrame(frameAtNearEnd());
+      final two = session.lockProgress;
+
+      expect(two, greaterThan(one));
+      expect(two, lessThan(1));
     });
 
     test('"Use this" accepts the face in view straight away', () {
@@ -261,7 +322,67 @@ void main() {
       }
 
       expect(session.step, ScanStep.farEnd);
+      expect(session.guidance.headline, contains('same way'));
+      expect(session.farEndCheck!.verdict, FarEndVerdict.facingTheSameWay);
+    });
+
+    test('the first end seen again is called the first end', () {
+      final session = walkedSession()..atFarEnd();
+
+      for (var i = 0; i < 4; i++) {
+        session.onFrame(frameAtNearEnd());
+      }
+
+      expect(session.farEndCheck!.verdict, FarEndVerdict.sameEnd);
       expect(session.guidance.headline, contains('already scanned'));
+
+      // It cannot be offered as the far end, or vouched for.
+      expect(session.canUseCurrentFace, isFalse);
+    });
+
+    test('an end far off to one side says so, and can be vouched for', () {
+      final session = walkedSession()..atFarEnd();
+
+      for (var i = 0; i < 5; i++) {
+        session.onFrame(frameAtFarEnd(sideways: 1.9));
+      }
+
+      // Not accepted by itself: it might be another log's end.
+      expect(session.step, ScanStep.farEnd);
+      expect(session.farEndCheck!.verdict, FarEndVerdict.offTheLine);
+      expect(session.guidance.headline, contains('off to one side'));
+
+      // But the user can see the log and the scanner cannot.
+      expect(session.canUseCurrentFace, isTrue);
+      expect(session.useCurrentFace(), ScanEvent.finished);
+
+      expect(session.step, ScanStep.finished);
+      expect(session.result!.farFace, isNotNull);
+      expect(session.report(), contains('against the geometry'));
+    });
+
+    test('an end almost level with the first is too close to be the other', () {
+      final session = walkedSession()..atFarEnd();
+
+      // Faces the right way, 25 cm to the side, 5 cm along.
+      final camera = SyntheticCamera(
+        transform: Matrix4.translationValues(0.25, 0, -1.2)..rotateY(math.pi),
+      );
+
+      clock += 0.1;
+      session.onFrame(
+        camera.frame(
+          camera.renderFace(
+            centre: Vector3(0, 0, -0.55),
+            normal: Vector3(0, 0, 1),
+            outline: (_) => radius,
+          ),
+          timestamp: clock,
+        ),
+      );
+
+      expect(session.farEndCheck!.verdict, FarEndVerdict.tooClose);
+      expect(session.canUseCurrentFace, isFalse);
     });
 
     test('can be marked by eye when it cannot be scanned', () {
@@ -295,6 +416,116 @@ void main() {
       expect(session.step, ScanStep.walk);
       expect(session.canMarkFarEnd, isFalse);
       expect(session.markFarEndHere(), isNull);
+    });
+  });
+
+  group('aiming at a particular end', () {
+    // The camera has moved to one side, so the end is off the middle of the
+    // screen -- as when the log is one of many in view.
+    frameOffCentre(double shift) {
+      final camera = SyntheticCamera(
+        transform: Matrix4.translationValues(shift, 0, 0),
+      );
+
+      clock += 0.1;
+      return camera.frame(
+        camera.renderFace(
+          centre: Vector3(-shift, 0, -0.6),
+          normal: Vector3(0, 0, 1),
+          outline: (_) => radius,
+        ),
+        timestamp: clock,
+      );
+    }
+
+    test('without a tap the middle of the screen is what is measured', () {
+      final session = LogScanSession();
+
+      for (var i = 0; i < 6; i++) {
+        session.onFrame(frameOffCentre(0.15));
+      }
+
+      expect(session.step, ScanStep.nearEnd);
+    });
+
+    test('a tap picks the end, and it stays picked as the phone moves', () {
+      final session = LogScanSession();
+
+      // One look to have a frame to tap on, aimed at the end.
+      session.onFrame(frameAtNearEnd());
+      expect(session.aimAtPixel(64, 48), isTrue);
+      expect(session.hasAim, isTrue);
+
+      // Then the phone drifts sideways; the end slides off-centre.
+      ScanEvent? event;
+      for (final shift in [0.05, 0.10, 0.15, 0.15, 0.15]) {
+        event ??= session.onFrame(frameOffCentre(shift));
+      }
+
+      expect(event, ScanEvent.nearEndLocked);
+      expect(session.nearFace!.centre.x, closeTo(0, 0.03));
+      expect(session.hasAim, isFalse, reason: 'the aim is spent once it locks');
+    });
+
+    test('an aim that leaves the screen falls back to the middle', () {
+      final session = LogScanSession();
+
+      session.onFrame(frameAtNearEnd());
+      session.aimAtPixel(64, 48);
+
+      // Turned right round: the tapped end is behind the camera.
+      final away = SyntheticCamera(
+        transform: Matrix4.identity()..rotateY(math.pi),
+      );
+
+      clock += 0.1;
+      session.onFrame(
+        away.frame(
+          away.renderFace(
+            centre: Vector3(0, 0, -1),
+            normal: Vector3(0, 0, 1),
+            outline: (_) => 0,
+          ),
+          timestamp: clock,
+        ),
+      );
+
+      expect(session.aimVisible, isFalse);
+    });
+  });
+
+  group('the report', () {
+    test('says what happened, in numbers', () {
+      final session = LogScanSession();
+
+      for (var i = 0; i < 4; i++) {
+        session.onFrame(frameAtNearEnd());
+      }
+
+      final report = session.report();
+
+      expect(report, contains('near end locked'));
+      expect(report, contains('girth'));
+      expect(report, contains('Frames'));
+      expect(report, contains('found'));
+    });
+
+    test('keeps the reason a far end was turned down', () {
+      final session = LogScanSession();
+
+      for (var i = 0; i < 4; i++) {
+        session.onFrame(frameAtNearEnd());
+      }
+
+      session.atFarEnd();
+      for (var i = 0; i < 3; i++) {
+        session.onFrame(frameAtSomeOtherEndFacingTheWrongWay());
+      }
+
+      final report = session.report();
+
+      expect(report, contains('facingTheSameWay'));
+      expect(report, contains('facing'));
     });
   });
 

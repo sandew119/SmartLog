@@ -92,6 +92,18 @@ class TrunkProfiler {
   /// as having left the log.
   static const double maxSlabSpreadMetres = 1.2;
 
+  /// A slice is read only while it is seen roughly side-on: no more than this
+  /// many degrees from the line of sight that meets the log at a right angle.
+  ///
+  /// The width comes from the two rays that graze the log's edges, and they
+  /// graze it at the slice's own position only when they arrive square. Seen
+  /// obliquely -- a slice well ahead of the camera along the log -- the rays
+  /// touch the surface further along, where a tapering or waisted log has a
+  /// different radius, and the width comes out wrong by more than the taper
+  /// itself. A tapered log read from every angle gave a staircase of errors,
+  /// up to 8%, worst for the slices seen most obliquely.
+  static const double maxObliqueDegrees = 22;
+
   /// Reads every slice of trunk visible in one frame.
   ///
   /// [origin] and [axis] describe the log as currently understood -- the
@@ -133,6 +145,11 @@ class TrunkProfiler {
     final e2 = basis.v;
 
     final camera = frame.cameraPosition;
+
+    // Where along the log the camera stands, and how far off the log it is.
+    final fromOrigin = camera - origin;
+    final footAlong = fromOrigin.dot(unitAxis);
+    final lateral = (fromOrigin - unitAxis * footAlong).length;
     final cameraX = camera.dot(e1);
     final cameraY = camera.dot(e2);
 
@@ -157,8 +174,14 @@ class TrunkProfiler {
 
     final samples = <TrunkWidthSample>[];
 
-    for (final points in slabs.values) {
+    for (final entry in slabs.entries) {
+      final points = entry.value;
       if (points.length < minPointsPerSlab) continue;
+
+      final middle = (entry.key + 0.5) * slabMetres;
+      final oblique = math.atan2((middle - footAlong).abs(), lateral);
+
+      if (oblique * 180 / math.pi > maxObliqueDegrees) continue;
 
       final sample = _measureSlab(
         points,
@@ -454,9 +477,84 @@ class LogGirthModel {
     return near + (_ratioFor(far, lateral) - near) * t;
   }
 
+  /// How far in from each end the trunk is used to calibrate it, in metres.
+  /// Starts a little in, because a slice straddling a cut face measures that
+  /// face's silhouette.
+  static const double calibrationFromMetres = 0.10;
+  static const double calibrationToMetres = 0.55;
+
+  /// The most the trunk may be scaled up to match an end. The correction is
+  /// for readings that come out *narrow* -- lost edge pixels, a lower
+  /// silhouette hidden by the ground -- and a slice that needs more than this
+  /// is not measuring the same log.
+  static const double maxCalibration = 1.15;
+  static const double minCalibration = 0.97;
+
   /// Girths inferred along the trunk, one per reporting slice, near end
   /// first.
-  List<GirthAtPosition> get trunkProfile {
+  ///
+  /// Read from one side, a trunk's width is biased, and by an amount that is
+  /// nearly constant along the log: pixels lost at the silhouette, and on a
+  /// log lying on the ground the lower edge is never seen at all. The end
+  /// faces are measured exactly, and the trunk beside each of them should
+  /// match it, so the raw trunk is scaled by whatever it takes to agree with
+  /// the ends -- which cancels a constant bias, and leaves what is *different*
+  /// about the middle: a waist, or a taper. See [_anchoredToTheEnds].
+  List<GirthAtPosition> get trunkProfile => _anchoredToTheEnds(_rawTrunkProfile);
+
+  List<GirthAtPosition> _anchoredToTheEnds(List<GirthAtPosition> raw) {
+    if (raw.length < 2) return raw;
+
+    double? factorAt(bool near) {
+      final face = near ? nearFace : farFace;
+      if (face == null || (!near && farEndEstimated)) return null;
+
+      final ratios = <double>[];
+
+      for (final slice in raw) {
+        final t = near ? slice.axialPosition : lengthMetres - slice.axialPosition;
+        if (t < calibrationFromMetres || t > calibrationToMetres) continue;
+
+        if (slice.girthMetres > 0) {
+          ratios.add(face.girthMetres / slice.girthMetres);
+        }
+      }
+
+      if (ratios.length < 2) return null;
+
+      ratios.sort();
+      final k = ratios[ratios.length ~/ 2];
+
+      return (k >= minCalibration && k <= maxCalibration) ? k : null;
+    }
+
+    final kNear = factorAt(true);
+    final kFar = factorAt(false);
+
+    if (kNear == null && kFar == null) return raw;
+
+    return [
+      for (final slice in raw)
+        GirthAtPosition(
+          axialPosition: slice.axialPosition,
+          girthMetres: slice.girthMetres *
+              _calibrationAt(slice.axialPosition, kNear, kFar),
+          inferred: true,
+        ),
+    ];
+  }
+
+  double _calibrationAt(double position, double? kNear, double? kFar) {
+    if (kNear != null && kFar != null && lengthMetres > 0) {
+      final t = (position / lengthMetres).clamp(0.0, 1.0);
+      return kNear + (kFar - kNear) * t;
+    }
+
+    return kNear ?? kFar ?? 1.0;
+  }
+
+  /// The trunk as read, before it is anchored to the ends.
+  List<GirthAtPosition> get _rawTrunkProfile {
     final bySlab = <int, List<double>>{};
 
     for (final sample in samples) {

@@ -49,16 +49,19 @@ class SyntheticCamera {
         -1,
       );
 
-  DepthFrame frame(
+  /// The payload the native side sends for a frame: exactly what
+  /// [DepthFrame.fromNative] reads, so a test can deliver it over a channel.
+  Map<String, Object?> payload(
     Float32List depths, {
     bool tracking = true,
     double timestamp = 1.0,
+    Uint8List? confidence,
   }) {
-    return DepthFrame.fromNative({
+    return {
       'width': width,
       'height': height,
       'depths': depths,
-      'confidence': null,
+      'confidence': confidence,
       'imageWidth': width * imageScale,
       'imageHeight': height * imageScale,
       'fx': fx * imageScale,
@@ -71,7 +74,23 @@ class SyntheticCamera {
       'tracking': tracking ? 'normal' : 'limited',
       'trackingReason': tracking ? '' : 'excessiveMotion',
       'timestamp': timestamp,
-    })!;
+    };
+  }
+
+  DepthFrame frame(
+    Float32List depths, {
+    bool tracking = true,
+    double timestamp = 1.0,
+    Uint8List? confidence,
+  }) {
+    return DepthFrame.fromNative(
+      payload(
+        depths,
+        tracking: tracking,
+        timestamp: timestamp,
+        confidence: confidence,
+      ),
+    )!;
   }
 
   /// A flat face floating in front of a background wall.
@@ -189,4 +208,197 @@ double truePerimeter(double Function(double angle) outline, {int steps = 4000}) 
   }
 
   return total;
+}
+
+/// The nearer of two rendered scenes at every pixel -- how separate objects
+/// in one view occlude each other.
+Float32List nearest(Float32List a, Float32List b) {
+  final out = Float32List(a.length);
+  for (var i = 0; i < a.length; i++) {
+    out[i] = a[i] < b[i] ? a[i] : b[i];
+  }
+  return out;
+}
+
+/// Standard normal deviate (Box-Muller), from a seeded generator so a noisy
+/// test is the same test on every run.
+double gaussian(math.Random rng) {
+  final u = 1 - rng.nextDouble();
+  final v = rng.nextDouble();
+  return math.sqrt(-2 * math.log(u)) * math.cos(2 * math.pi * v);
+}
+
+/// What a real LiDAR depth map does to a perfect one.
+///
+/// The clean renders above are exact, which is exactly why the scanner's
+/// constants once looked fine and then struggled on a phone. A real map:
+///
+/// - carries noise that grows with range, and is smooth over a couple of
+///   pixels rather than independent per pixel (ARKit's depth is filtered);
+/// - smears across every depth step, leaving pixels part-way between the
+///   object and what is behind it;
+/// - and reports low confidence along exactly those steps.
+///
+/// The figures are deliberately on the harsh side of what is published for an
+/// iPhone 13 Pro, because a scanner that survives this survives the yard.
+class SensorModel {
+  /// Noise standard deviation at zero range and its growth per metre.
+  final double baseSigmaMetres;
+  final double sigmaPerMetre;
+
+  /// A step in depth bigger than this is an edge.
+  final double edgeStepMetres;
+
+  /// Chance an edge pixel is reported at low confidence.
+  final double edgeDropout;
+
+  const SensorModel({
+    this.baseSigmaMetres = 0.0015,
+    this.sigmaPerMetre = 0.004,
+    this.edgeStepMetres = 0.03,
+    this.edgeDropout = 0.6,
+  });
+
+  static const SensorModel clean = SensorModel(
+    baseSigmaMetres: 0,
+    sigmaPerMetre: 0,
+    edgeDropout: 0,
+  );
+
+  ({Float32List depths, Uint8List confidence}) apply(
+    Float32List source,
+    int width,
+    int height,
+    math.Random rng,
+  ) {
+    final depths = Float32List.fromList(source);
+    final confidence = Uint8List(width * height)..fillRange(0, width * height, 2);
+
+    bool inside(int x, int y) => x >= 0 && y >= 0 && x < width && y < height;
+
+    // Edge smear and confidence, worked out against the clean scene.
+    final smeared = Float32List.fromList(source);
+
+    for (var y = 0; y < height; y++) {
+      for (var x = 0; x < width; x++) {
+        final here = source[y * width + x];
+        var edge = false;
+
+        for (var dy = -1; dy <= 1 && !edge; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            if (!inside(x + dx, y + dy)) continue;
+            if ((source[(y + dy) * width + x + dx] - here).abs() >
+                edgeStepMetres) {
+              edge = true;
+              break;
+            }
+          }
+        }
+
+        if (!edge) continue;
+
+        var total = 0.0;
+        var count = 0;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            if (!inside(x + dx, y + dy)) continue;
+            total += source[(y + dy) * width + x + dx];
+            count++;
+          }
+        }
+
+        smeared[y * width + x] = total / count;
+
+        if (rng.nextDouble() < edgeDropout) confidence[y * width + x] = 0;
+      }
+    }
+
+    // Noise, smooth over ~3 pixels: white noise averaged over a 3x3 window,
+    // scaled back up so the standard deviation is what was asked for.
+    final white = Float32List(width * height);
+    for (var i = 0; i < white.length; i++) {
+      white[i] = gaussian(rng).toDouble();
+    }
+
+    for (var y = 0; y < height; y++) {
+      for (var x = 0; x < width; x++) {
+        var total = 0.0;
+        var count = 0;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            if (!inside(x + dx, y + dy)) continue;
+            total += white[(y + dy) * width + x + dx];
+            count++;
+          }
+        }
+
+        final d = smeared[y * width + x];
+        final sigma = baseSigmaMetres + sigmaPerMetre * d;
+        depths[y * width + x] = d + (total / count) * 3 * sigma;
+      }
+    }
+
+    return (depths: depths, confidence: confidence);
+  }
+}
+
+extension SyntheticScenes on SyntheticCamera {
+  /// A flat ground plane [below] metres under the camera, out to [reach].
+  Float32List renderGround({double below = 1.2, double reach = 8}) {
+    return renderFace(
+      centre: Vector3(0, -below, -1),
+      normal: Vector3(0, 1, 0),
+      outline: (_) => 1e9,
+      backgroundDepth: reach,
+    );
+  }
+
+  /// A frame of [scene] as the sensor would report it.
+  DepthFrame sensedFrame(
+    Float32List scene,
+    math.Random rng, {
+    SensorModel model = const SensorModel(),
+    double timestamp = 1.0,
+    bool tracking = true,
+  }) {
+    final sensed = model.apply(scene, width, height, rng);
+
+    return frame(
+      sensed.depths,
+      confidence: sensed.confidence,
+      timestamp: timestamp,
+      tracking: tracking,
+    );
+  }
+}
+
+extension WorldScenes on SyntheticCamera {
+  /// A flat face placed in WORLD coordinates and rendered through this
+  /// camera's pose. The plain [SyntheticCamera.renderFace] takes camera-space
+  /// coordinates, which is fine for a camera at the origin but awkward for
+  /// one tilted down at a log end on the ground.
+  Float32List renderWorldFace({
+    required Vector3 centre,
+    required Vector3 normal,
+    required double Function(double angle) outline,
+    double backgroundDepth = 6.0,
+  }) {
+    final inverse = Matrix4.inverted(transform);
+
+    return renderFace(
+      centre: inverse.transformed3(centre),
+      normal: inverse.rotated3(normal),
+      outline: outline,
+      backgroundDepth: backgroundDepth,
+    );
+  }
+
+  Float32List renderWorldGround({double y = -1.1, double reach = 8}) {
+    return renderWorldFace(
+      centre: Vector3(0, y, 0),
+      normal: Vector3(0, 1, 0),
+      outline: (_) => 1e9,
+      backgroundDepth: reach,
+    );
+  }
 }

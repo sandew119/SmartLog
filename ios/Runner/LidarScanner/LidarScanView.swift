@@ -393,7 +393,76 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
 
     private func clearMarkers() {
         sceneView.scene.rootNode.childNodes
-            .filter { $0.name?.hasPrefix("marker:") == true }
+            .filter {
+                $0.name?.hasPrefix("marker:") == true
+                    || $0.name?.hasPrefix("outline:") == true
+            }
+            .forEach { $0.removeFromParentNode() }
+    }
+
+    // MARK: - Outlines
+
+    /// Draws a ribbon on the log: the outline the scanner is measuring, in the
+    /// place it is measuring it.
+    ///
+    /// Dart builds the ribbon -- a closed strip of triangles, two vertices to
+    /// each point of the outline -- and this only hands it to SceneKit. It is
+    /// anchored in the world, so it stays on the end as the phone moves, and
+    /// it is what tells the user, before any number appears, that the app has
+    /// found the right thing and is working on it.
+    private func showOutline(id: String, vertices: [Float], color: UIColor) {
+        let name = "outline:\(id)"
+
+        sceneView.scene.rootNode.childNodes
+            .filter { $0.name == name }
+            .forEach { $0.removeFromParentNode() }
+
+        let count = vertices.count / 3
+        guard count >= 4 else { return }
+
+        var points: [SCNVector3] = []
+        points.reserveCapacity(count)
+
+        for i in 0..<count {
+            points.append(
+                SCNVector3(vertices[3 * i], vertices[3 * i + 1], vertices[3 * i + 2])
+            )
+        }
+
+        let source = SCNGeometrySource(vertices: points)
+
+        let indices: [Int32] = (0..<Int32(count)).map { $0 }
+        let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
+
+        let element = SCNGeometryElement(
+            data: indexData,
+            primitiveType: .triangleStrip,
+            primitiveCount: count - 2,
+            bytesPerIndex: MemoryLayout<Int32>.size
+        )
+
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+
+        let material = SCNMaterial()
+        material.diffuse.contents = color
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        material.writesToDepthBuffer = false
+        material.readsFromDepthBuffer = false
+        geometry.materials = [material]
+
+        let node = SCNNode(geometry: geometry)
+        node.name = name
+        node.renderingOrder = 100
+
+        sceneView.scene.rootNode.addChildNode(node)
+    }
+
+    private func clearOutline(id: String) {
+        let name = "outline:\(id)"
+
+        sceneView.scene.rootNode.childNodes
+            .filter { $0.name == name }
             .forEach { $0.removeFromParentNode() }
     }
 
@@ -473,6 +542,68 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
             clearMarkers()
             result(nil)
 
+        case "showOutline":
+            guard let id = args?["id"] as? String,
+                  let vertices = LidarScanView.floats(args?["vertices"]),
+                  let red = LidarScanView.float(args?["r"]),
+                  let green = LidarScanView.float(args?["g"]),
+                  let blue = LidarScanView.float(args?["b"]),
+                  let alpha = LidarScanView.float(args?["a"])
+            else {
+                result(nil)
+                return
+            }
+
+            showOutline(
+                id: id,
+                vertices: vertices,
+                color: UIColor(
+                    red: CGFloat(red),
+                    green: CGFloat(green),
+                    blue: CGFloat(blue),
+                    alpha: CGFloat(alpha)
+                )
+            )
+            result(nil)
+
+        case "clearOutline":
+            if let id = args?["id"] as? String {
+                clearOutline(id: id)
+            }
+            result(nil)
+
+        case "viewToImage":
+            // Where a tap on the screen lands in the camera image -- and so in
+            // the depth map, which is the same picture. ARKit knows how the
+            // image is rotated and cropped to fill the screen; this asks it,
+            // instead of Dart guessing at the orientation.
+            guard let frame = sceneView.session.currentFrame,
+                  let x = LidarScanView.float(args?["x"]),
+                  let y = LidarScanView.float(args?["y"])
+            else {
+                result(nil)
+                return
+            }
+
+            let size = sceneView.bounds.size
+            guard size.width > 0, size.height > 0 else {
+                result(nil)
+                return
+            }
+
+            let orientation = sceneView.window?.windowScene?.interfaceOrientation
+                ?? .portrait
+
+            let toScreen = frame.displayTransform(
+                for: orientation,
+                viewportSize: size
+            )
+
+            let point = CGPoint(x: CGFloat(x), y: CGFloat(y))
+                .applying(toScreen.inverted())
+
+            result(["u": Double(point.x), "v": Double(point.y)])
+
         case "speak":
             if let text = args?["text"] as? String, !text.isEmpty {
                 // A new milestone replaces an old one rather than queueing
@@ -487,6 +618,18 @@ class LidarScanView: NSObject, FlutterPlatformView, ARSessionDelegate {
 
         default:
             result(FlutterMethodNotImplemented)
+        }
+    }
+
+    /// A Float32 buffer from Dart, as an array.
+    private static func floats(_ value: Any?) -> [Float]? {
+        guard let typed = value as? FlutterStandardTypedData else { return nil }
+
+        let count = typed.data.count / MemoryLayout<Float>.size
+        guard count > 0 else { return nil }
+
+        return typed.data.withUnsafeBytes { raw in
+            Array(raw.bindMemory(to: Float.self).prefix(count))
         }
     }
 

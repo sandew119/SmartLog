@@ -231,12 +231,16 @@ void main() {
   });
 
   group('a log resting against its neighbour', () {
-    test('two ends touching are refused, not averaged into one girth', () {
+    test('two ends touching: the one aimed at is measured, not the pair', () {
       // Coplanar and in contact, which is the one arrangement no depth test
-      // can separate: there is no step between them to stop at. The scanner
-      // must refuse rather than report the peanut it traced -- a confident
-      // wrong girth is far worse here than no reading, and the user fixes it
-      // by shifting their aim.
+      // can separate: there is no step between them to stop at. They are told
+      // apart by shape instead -- two fat blobs joined by a thin neck -- and
+      // the one under the reticle is measured on its own.
+      //
+      // Before, this was refused as "more than one log". That protected the
+      // user from a wrong girth, but it also refused every stack, and a stack
+      // of seven ends in a hexagon slipped straight through as one face three
+      // times too big. See `face_yard_test.dart`.
       const radius = 0.12;
 
       final depths = camera.renderFace(
@@ -255,10 +259,12 @@ void main() {
         if (neighbour[i] < depths[i]) depths[i] = neighbour[i];
       }
 
-      final attempt = FaceScanner.detect(camera.frame(depths));
+      final face = requireFace(FaceScanner.detect(camera.frame(depths)));
 
-      expect(attempt.isFound, isFalse);
-      expect(attempt.rejection, FaceRejection.moreThanOneLog);
+      expect(
+        face.girthMetres,
+        closeTo(2 * math.pi * radius, 0.08 * 2 * math.pi * radius),
+      );
     });
 
     test('one end with the neighbour set back is measured normally', () {

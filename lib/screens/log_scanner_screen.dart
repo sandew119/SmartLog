@@ -1,20 +1,29 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:vector_math/vector_math_64.dart' show Vector3;
 
 import '../models/log_measurement.dart';
 import '../services/lidar_scanner_service.dart';
 import '../services/user_preferences_service.dart';
 import '../utils/depth_frame.dart';
 import '../utils/face_scan.dart';
+import '../utils/log_girth_model.dart';
 import '../utils/log_scan_session.dart';
 import '../utils/log_volume_pipeline.dart';
+import '../utils/outline_ribbon.dart';
 import '../utils/timber_volume.dart';
 import '../utils/unit_display.dart';
 
 /// Measures a log with LiDAR in three steps: point at one cut end, walk to
 /// the other, point at that one.
+///
+/// While it works, the app draws what it is measuring: a ribbon round the cut
+/// end that turns from white to amber to green as the readings settle, so the
+/// user can see it has found the right thing and is working on it -- and a tap
+/// on any end in view chooses it, for a yard with a hundred in sight.
 ///
 /// Built for someone who has never used a scanning app and does not want to
 /// learn one. There is one instruction on screen at a time, in plain words,
@@ -45,6 +54,10 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
 
   String? _toast;
   Timer? _toastTimer;
+
+  bool _liveOutlineShown = false;
+  bool _aimShown = false;
+  double _lastProgress = 0;
 
   @override
   void dispose() {
@@ -133,9 +146,15 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
       );
       if (frame == null) return;
 
+      final watch = Stopwatch()..start();
       final event = _session.onFrame(frame);
+      watch.stop();
+
+      _session.diagnostics.noteProcessing(watch.elapsedMicroseconds / 1000);
 
       setState(() => _cameraProblem = null);
+
+      _updateOverlays();
 
       if (event != null) _onEvent(event);
     } finally {
@@ -150,6 +169,8 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
       case ScanEvent.nearEndLocked:
         HapticFeedback.heavyImpact();
 
+        _dropLiveOverlays();
+
         final face = _session.nearFace;
         if (face != null) _markFace("near", face);
 
@@ -161,6 +182,8 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
 
       case ScanEvent.finished:
         HapticFeedback.heavyImpact();
+
+        _dropLiveOverlays();
 
         final face = _session.farFace;
         if (face != null) _markFace("far", face);
@@ -187,11 +210,163 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
       normal: face.normal,
       radius: face.diameterMetres / 2,
     );
+
+    // The outline it measured, kept on the end as proof of what was measured.
+    _drawOutline(id, face, _goodColour);
   }
 
   void _clearMarkers() {
     final id = _viewId;
     if (id != null) _service.clearMarkers(id);
+
+    _liveOutlineShown = false;
+    _aimShown = false;
+    _lastProgress = 0;
+  }
+
+  void _drawOutline(String id, FaceScan face, Color colour) {
+    final viewId = _viewId;
+    if (viewId == null) return;
+
+    _service.showOutline(
+      viewId,
+      id: id,
+      vertices: OutlineRibbon.strip(
+        face.outlinePoints(),
+        face.normal,
+        OutlineRibbon.halfWidthFor(face.distanceMetres),
+      ),
+      red: colour.r,
+      green: colour.g,
+      blue: colour.b,
+    );
+  }
+
+  /// Keeps what is drawn on the log in step with what the scanner sees: the
+  /// outline it is measuring right now, coloured by how settled the reading
+  /// is, and a tick under the thumb each time another reading agrees.
+  void _updateOverlays() {
+    final viewId = _viewId;
+    if (viewId == null) return;
+
+    final step = _session.step;
+    final face = (step == ScanStep.nearEnd || step == ScanStep.farEnd)
+        ? _session.currentFace
+        : null;
+
+    if (face == null) {
+      if (_liveOutlineShown) {
+        _service.clearOutline(viewId, "live");
+        _liveOutlineShown = false;
+      }
+
+      _lastProgress = 0;
+    } else {
+      final progress = _session.lockProgress;
+
+      final colour = progress >= 1
+          ? _goodColour
+          : (progress > 0.3 ? _measuringColour : Colors.white);
+
+      _drawOutline("live", face, colour);
+      _liveOutlineShown = true;
+
+      // One tick for each new reading that agrees: the phone's way of saying
+      // "still working on it".
+      if (progress > _lastProgress && progress < 1) {
+        HapticFeedback.selectionClick();
+      }
+
+      _lastProgress = progress;
+    }
+
+    if (!_session.hasAim && _aimShown) {
+      _service.clearOutline(viewId, "aim");
+      _aimShown = false;
+    }
+  }
+
+  void _dropLiveOverlays() {
+    final viewId = _viewId;
+    if (viewId == null) return;
+
+    _service.clearOutline(viewId, "live");
+    _service.clearOutline(viewId, "aim");
+
+    _liveOutlineShown = false;
+    _aimShown = false;
+    _lastProgress = 0;
+  }
+
+  // --- Choosing an end ----------------------------------------------------
+
+  /// A tap on the picture picks the end under the finger. In a yard with a
+  /// hundred logs in view the middle of the screen is a poor way to choose one.
+  Future<void> _onTapView(Offset at, Size size) async {
+    final viewId = _viewId;
+    if (viewId == null || size.width <= 0 || size.height <= 0) return;
+
+    final step = _session.step;
+    if (step != ScanStep.nearEnd && step != ScanStep.farEnd) return;
+
+    final place = await _service.viewToImage(
+      viewId,
+      x: at.dx / size.width,
+      y: at.dy / size.height,
+    );
+
+    if (!mounted) return;
+
+    if (place == null || !_session.aimAtImagePoint(place.u, place.v)) {
+      _showToast("Nothing to measure there");
+      return;
+    }
+
+    HapticFeedback.selectionClick();
+    _drawAimRing();
+
+    setState(() {});
+  }
+
+  /// A small ring on the chosen spot, held in the world so it stays put.
+  void _drawAimRing() {
+    final viewId = _viewId;
+    final centre = _session.aimPoint;
+    final facing = _session.aimFacing;
+
+    if (viewId == null || centre == null || facing == null) return;
+
+    final basis = perpendicularBasis(facing);
+    const radius = 0.035;
+
+    final ring = <Vector3>[
+      for (var i = 0; i < 24; i++)
+        centre +
+            basis.u * (radius * math.cos(2 * math.pi * i / 24)) +
+            basis.v * (radius * math.sin(2 * math.pi * i / 24)),
+    ];
+
+    _service.showOutline(
+      viewId,
+      id: "aim",
+      vertices: OutlineRibbon.strip(ring, facing, 0.004),
+      red: 1,
+      green: 1,
+      blue: 1,
+    );
+
+    _aimShown = true;
+  }
+
+  void _useMiddleAgain() {
+    final viewId = _viewId;
+
+    _session.clearAim();
+
+    if (viewId != null) _service.clearOutline(viewId, "aim");
+    _aimShown = false;
+
+    setState(() {});
   }
 
   void _say(String text) {
@@ -239,6 +414,57 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
     Navigator.pop(context, result.toMeasurement());
   }
 
+  /// The scan's own account of itself -- frames, rejections, the numbers behind
+  /// every decision -- as text to send back after a device test.
+  Future<void> _copyReport() async {
+    await Clipboard.setData(ClipboardData(text: _session.report()));
+
+    if (!mounted) return;
+    _showToast("Scan report copied");
+  }
+
+  void _showReport() {
+    final report = _session.report();
+
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF111111),
+        title: const Text(
+          "Scan report",
+          style: TextStyle(color: Colors.white),
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              report,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontFamily: "Courier",
+                fontSize: 11,
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: report));
+              Navigator.pop(context);
+              _showToast("Scan report copied");
+            },
+            child: const Text("Copy"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Close"),
+          ),
+        ],
+      ),
+    );
+  }
+
   // --- Layout -----------------------------------------------------------
 
   @override
@@ -266,7 +492,20 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
             ),
           ),
 
+          // Above the camera and below everything else: a tap on the picture
+          // chooses the end under it.
           if (result == null && aimingAtAFace)
+            Positioned.fill(
+              child: LayoutBuilder(
+                builder: (context, box) => GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTapUp: (details) =>
+                      _onTapView(details.localPosition, box.biggest),
+                ),
+              ),
+            ),
+
+          if (result == null && aimingAtAFace && !_session.hasAim)
             Center(
               child: _FaceReticle(
                 progress: guidance.progress ?? 0,
@@ -282,6 +521,7 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
               children: [
                 _TopBar(
                   step: step,
+                  onReport: _showReport,
                   onClose: () => Navigator.pop(context),
                   onStartOver: step == ScanStep.nearEnd &&
                           _session.currentFace == null
@@ -289,7 +529,16 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
                       : _startOver,
                 ),
                 if (result == null) _GuidanceBanner(guidance: guidance),
+                if (result == null && aimingAtAFace)
+                  _AimHint(
+                    hasAim: _session.hasAim,
+                    aimVisible: _session.aimVisible,
+                    onClear: _useMiddleAgain,
+                  ),
                 const Spacer(),
+                if (result == null &&
+                    (step == ScanStep.walk || step == ScanStep.farEnd))
+                  _ProfileStrip(session: _session),
                 if (result == null) ...[
                   _LiveReadout(session: _session),
                   _Controls(
@@ -314,6 +563,7 @@ class _LogScannerScreenState extends State<LogScannerScreen> {
                 result: result,
                 onContinue: _finish,
                 onScanAgain: _startOver,
+                onCopyReport: _copyReport,
               ),
             ),
 
@@ -336,15 +586,22 @@ const _panel = Color(0xCC000000);
 const _good = Color(0xFF34C759);
 const _warning = Color(0xFFFFB020);
 
+/// The outline on the log: white while looking, amber while measuring, green
+/// once the readings agree.
+const _goodColour = Color(0xFF34C759);
+const _measuringColour = Color(0xFFFFB020);
+
 /// Where the user is in the three steps.
 class _TopBar extends StatelessWidget {
   final ScanStep step;
   final VoidCallback onClose;
+  final VoidCallback onReport;
   final VoidCallback? onStartOver;
 
   const _TopBar({
     required this.step,
     required this.onClose,
+    required this.onReport,
     required this.onStartOver,
   });
 
@@ -369,18 +626,22 @@ class _TopBar extends StatelessWidget {
             tooltip: "Close",
           ),
           Expanded(
-            child: Row(
-              children: [
-                for (var i = 0; i < labels.length; i++)
-                  Expanded(
-                    child: _StepPill(
-                      number: i + 1,
-                      label: labels[i],
-                      done: i < current,
-                      active: i == current,
+            // Press and hold: the scan's report, for whoever is testing it.
+            child: GestureDetector(
+              onLongPress: onReport,
+              child: Row(
+                children: [
+                  for (var i = 0; i < labels.length; i++)
+                    Expanded(
+                      child: _StepPill(
+                        number: i + 1,
+                        label: labels[i],
+                        done: i < current,
+                        active: i == current,
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
           ),
           IconButton(
@@ -600,6 +861,22 @@ class _LiveReadout extends StatelessWidget {
       );
     }
 
+    if (step == ScanStep.walk) {
+      final thinnest = session.liveMinimumGirth;
+
+      if (thinnest != null) {
+        rows.add(
+          _SmallFigure(
+            label: "Thinnest so far",
+            value: UnitDisplay.across(
+              MeasurementUnits.metresToInches(thinnest.girthMetres),
+            ),
+            done: false,
+          ),
+        );
+      }
+    }
+
     if (step == ScanStep.walk || step == ScanStep.farEnd) {
       final along = session.furthestAlongMetres;
 
@@ -702,17 +979,28 @@ class _SmallFigure extends StatelessWidget {
         children: [
           if (done) const Icon(Icons.check_circle, color: _good, size: 18),
           if (done) const SizedBox(width: 6),
-          Text(
-            label,
-            style: const TextStyle(color: Colors.white70, fontSize: 14),
+          // Both sides give way rather than overflow: a large accessibility
+          // text size, or a long figure, must shrink and not run off the panel.
+          Flexible(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white70, fontSize: 14),
+            ),
           ),
-          const Spacer(),
-          Text(
-            value,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
+          const SizedBox(width: 8),
+          Expanded(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Text(
+                value,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
           ),
         ],
@@ -879,11 +1167,13 @@ class _ResultPanel extends StatelessWidget {
   final LogScanResult result;
   final VoidCallback onContinue;
   final VoidCallback onScanAgain;
+  final VoidCallback onCopyReport;
 
   const _ResultPanel({
     required this.result,
     required this.onContinue,
     required this.onScanAgain,
+    required this.onCopyReport,
   });
 
   @override
@@ -949,6 +1239,18 @@ class _ResultPanel extends StatelessWidget {
                 value: UnitDisplay.length(measurement.lengthFeet),
                 emphasised: true,
               ),
+              const SizedBox(height: 8),
+              SizedBox(
+                height: 64,
+                child: CustomPaint(
+                  painter: _ProfilePainter(
+                    points: result.profile,
+                    reference: result.faceGirthMetres,
+                    lengthMetres: math.max(result.lengthMetres, 0.5),
+                  ),
+                  child: const SizedBox.expand(),
+                ),
+              ),
               const Divider(color: Colors.white24, height: 22),
               _ResultRow(
                 label: "Volume",
@@ -985,6 +1287,13 @@ class _ResultPanel extends StatelessWidget {
                 child: const Text(
                   "Scan again",
                   style: TextStyle(color: Colors.white, fontSize: 16),
+                ),
+              ),
+              TextButton(
+                onPressed: onCopyReport,
+                child: const Text(
+                  "Copy scan report",
+                  style: TextStyle(color: Colors.white54, fontSize: 13),
                 ),
               ),
             ],
@@ -1053,4 +1362,183 @@ class _ResultRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The one line that says how to choose an end, and undoes the choice.
+class _AimHint extends StatelessWidget {
+  final bool hasAim;
+  final bool aimVisible;
+  final VoidCallback onClear;
+
+  const _AimHint({
+    required this.hasAim,
+    required this.aimVisible,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final text = !hasAim
+        ? "Tap the end you want to measure"
+        : (aimVisible
+            ? "Measuring the end you tapped"
+            : "The end you tapped is out of view — point back at it");
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Row(
+        children: [
+          Flexible(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: _panel,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                text,
+                style: TextStyle(
+                  color: hasAim && !aimVisible ? _warning : Colors.white70,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ),
+          if (hasAim) ...[
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: onClear,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: const Text(
+                  "Use the middle",
+                  style: TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The girth along the log as it is read, drawn while the user walks: the
+/// proof that the trunk is being measured, and the place a waist shows up.
+class _ProfileStrip extends StatelessWidget {
+  final LogScanSession session;
+
+  const _ProfileStrip({required this.session});
+
+  @override
+  Widget build(BuildContext context) {
+    final near = session.nearFace;
+    if (near == null) return const SizedBox.shrink();
+
+    final points = session.liveProfile;
+
+    return Container(
+      height: 58,
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      decoration: BoxDecoration(
+        color: _panel,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: CustomPaint(
+        painter: _ProfilePainter(
+          points: points,
+          reference: near.girthMetres,
+          lengthMetres: math.max(session.furthestAlongMetres, 0.5),
+        ),
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+}
+
+/// Girth against distance along the log, with the first end's girth as a
+/// dashed reference line.
+class _ProfilePainter extends CustomPainter {
+  final List<GirthAtPosition> points;
+  final double reference;
+  final double lengthMetres;
+
+  const _ProfilePainter({
+    required this.points,
+    required this.reference,
+    required this.lengthMetres,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (reference <= 0 || size.width <= 0 || size.height <= 0) return;
+
+    const pad = 8.0;
+
+    // Room for a log 25% thinner or 15% fatter than the end it started at.
+    final low = reference * 0.75;
+    final high = reference * 1.15;
+
+    double xFor(double along) =>
+        pad + (size.width - 2 * pad) * (along / lengthMetres).clamp(0.0, 1.0);
+
+    double yFor(double girth) =>
+        pad +
+        (size.height - 2 * pad) *
+            (1 - ((girth - low) / (high - low)).clamp(0.0, 1.0));
+
+    final guide = Paint()
+      ..color = Colors.white24
+      ..strokeWidth = 1;
+
+    final y = yFor(reference);
+    for (var x = pad; x < size.width - pad; x += 8) {
+      canvas.drawLine(Offset(x, y), Offset(x + 4, y), guide);
+    }
+
+    if (points.length < 2) return;
+
+    final line = Paint()
+      ..color = _good
+      ..strokeWidth = 2.5
+      ..style = PaintingStyle.stroke
+      ..strokeJoin = StrokeJoin.round;
+
+    final path = Path();
+
+    for (var i = 0; i < points.length; i++) {
+      final p = Offset(xFor(points[i].axialPosition), yFor(points[i].girthMetres));
+      if (i == 0) {
+        path.moveTo(p.dx, p.dy);
+      } else {
+        path.lineTo(p.dx, p.dy);
+      }
+    }
+
+    canvas.drawPath(path, line);
+
+    // The thinnest place, marked.
+    var thinnest = points.first;
+    for (final p in points) {
+      if (p.girthMetres < thinnest.girthMetres) thinnest = p;
+    }
+
+    canvas.drawCircle(
+      Offset(xFor(thinnest.axialPosition), yFor(thinnest.girthMetres)),
+      4.5,
+      Paint()..color = _warning,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_ProfilePainter old) =>
+      old.points != points ||
+      old.reference != reference ||
+      old.lengthMetres != lengthMetres;
 }
