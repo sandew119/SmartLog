@@ -57,7 +57,7 @@ class YoloDefectDetector implements DefectDetector {
   YoloDefectDetector({
     this.modelAsset = "assets/models/best.tflite",
     this.labelsAsset = "assets/models/best_labels.txt",
-    this.scoreThreshold = 0.25,
+    this.scoreThreshold = 0.10,
     this.iouThreshold = 0.45,
   });
 
@@ -69,6 +69,12 @@ class YoloDefectDetector implements DefectDetector {
   /// cutting engine acts on) -- a finding between the two is still shown to
   /// the user, with the "not sure enough to act on it" message the screen
   /// already has for exactly this case.
+  ///
+  /// Set low on purpose. A missed defect is a worse failure than an extra
+  /// low-confidence one someone has to dismiss by eye, and with no device to
+  /// calibrate this against, erring toward showing weak signal rather than
+  /// discarding it is the safer direction to be wrong in. Turn it back up
+  /// once real photos say this is too permissive, not before.
   final double scoreThreshold;
 
   final double iouThreshold;
@@ -206,9 +212,19 @@ class YoloDefectDetector implements DefectDetector {
         region: letterbox.toOriginal(d.boxInModelSpace),
         isHealthy: healthy,
       ));
+    }
 
-      final existing = scores[label];
-      if (existing == null || d.score > existing) scores[label] = d.score;
+    // The model's own best guess for each class, whether or not anything
+    // crossed the threshold. See strongestPerClass's own comment for why:
+    // this is what turns "no defects found" into a number someone can act
+    // on, rather than a dead end that looks the same whether the model
+    // barely looked or looked hard and stayed unconvinced.
+    final strongest = strongestPerClass(raw, numClasses: numClasses);
+
+    for (final entry in strongest.entries) {
+      if (entry.key >= 0 && entry.key < _labels.length) {
+        scores[_labels[entry.key]] = entry.value;
+      }
     }
 
     return DefectAnalysis(

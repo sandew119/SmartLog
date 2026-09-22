@@ -209,6 +209,54 @@ List<RawDetection> decodeYoloDetectionHead(
   return out;
 }
 
+/// The single highest score seen for each class, anywhere in the frame,
+/// with no threshold applied.
+///
+/// Not used to decide what counts as a finding -- [decodeYoloDetectionHead]
+/// does that. This is for the case that function reports nothing at all: a
+/// flat "no defects found" with no number behind it is indistinguishable
+/// from a model that never looked, and someone photographing a crack they
+/// can see by eye deserves better than that. Knowing the model's own best
+/// guess was, say, 8% crack says plainly that it saw something and stayed
+/// unconvinced, which points at a different problem (the threshold, the
+/// model's training, how the photo was taken) than a true zero would.
+Map<int, double> strongestPerClass(
+  List<List<double>> raw, {
+  required int numClasses,
+  bool autoSigmoid = true,
+}) {
+  if (raw.length < 4 + numClasses) return const {};
+
+  var needsSigmoid = false;
+
+  if (autoSigmoid) {
+    var peak = 0.0;
+    for (var c = 0; c < numClasses; c++) {
+      final row = raw[4 + c];
+      for (var a = 0; a < row.length; a++) {
+        if (row[a] > peak) peak = row[a];
+      }
+    }
+    needsSigmoid = peak > 1.5;
+  }
+
+  final best = <int, double>{};
+
+  for (var c = 0; c < numClasses; c++) {
+    final row = raw[4 + c];
+    var peak = -double.infinity;
+
+    for (var a = 0; a < row.length; a++) {
+      final score = needsSigmoid ? sigmoid(row[a]) : row[a];
+      if (score > peak) peak = score;
+    }
+
+    best[c] = peak;
+  }
+
+  return best;
+}
+
 /// Greedy non-max suppression, run separately per class.
 ///
 /// Per class, not across all of them: a crack box and a knot box that

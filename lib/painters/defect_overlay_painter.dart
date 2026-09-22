@@ -2,7 +2,6 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
-import '../models/log_defect.dart';
 import '../services/defect_detector.dart';
 import '../services/defect_impact.dart';
 import '../utils/fitted_image_mapper.dart';
@@ -127,14 +126,14 @@ class DefectOverlayPainter extends CustomPainter {
     final bottomRight = mapper.toScreen(finding.region.bottomRight);
     final rect = Rect.fromPoints(topLeft, bottomRight);
 
-    // A whole-image classifier reports the entire frame. Boxing the whole
-    // photograph tells the user nothing, so that case is left to the
-    // heatmap.
-    final coversEverything = rect.width >= mapper.displayRect.width * 0.95 &&
-        rect.height >= mapper.displayRect.height * 0.95;
-
-    if (coversEverything) return;
-
+    // There used to be a guard here that skipped drawing a box covering
+    // almost the whole photo, because the old whole-image classifier always
+    // reported one that did and boxing the entire picture told the user
+    // nothing. That detector is gone: every finding here now comes from a
+    // real detection with a real extent, and a crack photographed close up
+    // filling most of the frame is exactly a box that SHOULD be this big.
+    // Skipping it silently would look identical to the model having found
+    // nothing at all, which is a worse failure than an oversized box.
     final rounded = RRect.fromRectAndRadius(rect, const Radius.circular(6));
 
     canvas.drawRRect(
@@ -153,7 +152,7 @@ class DefectOverlayPainter extends CustomPainter {
     _drawLabel(
       canvas,
       rect,
-      "${finding.kind.label}  ${(finding.confidence * 100).round()}%",
+      "${finding.rawLabel}  ${(finding.confidence * 100).round()}%",
       colour,
     );
   }

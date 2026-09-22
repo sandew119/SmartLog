@@ -195,6 +195,57 @@ void main() {
     });
   });
 
+  group('strongestPerClass', () {
+    List<List<double>> emptyRaw(int numClasses, int numAnchors) => [
+          for (var i = 0; i < 4 + numClasses; i++) List<double>.filled(numAnchors, 0),
+        ];
+
+    test('reports the best score for every class, even ones nothing crosses a threshold for', () {
+      final raw = emptyRaw(3, 20);
+      raw[4][3] = 0.08; // Crack, weak
+      raw[4][9] = 0.12; // Crack, stronger elsewhere -- this should win
+      raw[5][5] = 0.31; // Hole
+      // Knot: never set, stays at the initial 0.
+
+      final best = strongestPerClass(raw, numClasses: 3);
+
+      expect(best.length, 3);
+      expect(best[0], closeTo(0.12, 1e-9)); // Crack
+      expect(best[1], closeTo(0.31, 1e-9)); // Hole
+      expect(best[2], closeTo(0.0, 1e-9)); // Knot
+    });
+
+    test('this is what tells a real-but-weak signal apart from silence', () {
+      // Nothing crosses a normal 0.10 threshold, but the model plainly saw
+      // *something*: it just was not confident. That distinction is the
+      // whole reason this function exists.
+      final raw = emptyRaw(3, 5);
+      raw[4][2] = 0.06;
+
+      final decoded = decodeYoloDetectionHead(raw, numClasses: 3, scoreThreshold: 0.10);
+      expect(decoded, isEmpty);
+
+      final best = strongestPerClass(raw, numClasses: 3);
+      expect(best[0], closeTo(0.06, 1e-9));
+    });
+
+    test('applies the same sigmoid recovery as the decoder', () {
+      final raw = emptyRaw(3, 5);
+      raw[4][0] = 3.0; // a logit, not a probability
+      raw[5][0] = 5.0; // pushes the peak over the auto-sigmoid threshold
+
+      final best = strongestPerClass(raw, numClasses: 3);
+
+      expect(best[0], closeTo(sigmoid(3.0), 1e-6));
+      expect(best[1], closeTo(sigmoid(5.0), 1e-6));
+    });
+
+    test('an output too short for the declared class count is refused, not crashed on', () {
+      final raw = [List<double>.filled(5, 0), List<double>.filled(5, 0)];
+      expect(strongestPerClass(raw, numClasses: 3), isEmpty);
+    });
+  });
+
   group('nonMaxSuppression', () {
     RawDetection box(double cx, double cy, double w, double h, int cls, double score) =>
         RawDetection(cx: cx, cy: cy, w: w, h: h, classIndex: cls, score: score);

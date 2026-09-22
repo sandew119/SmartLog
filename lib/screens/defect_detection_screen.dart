@@ -432,7 +432,8 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
         Icons.check_circle,
         Colors.green,
         "No defects found",
-        "The model checked this surface and found nothing wrong with it.",
+        "The model checked this surface and found nothing wrong with it."
+            "${_scoreFootnote(analysis)}",
       );
     }
 
@@ -444,7 +445,8 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
         "Everything the model saw scored below "
             "${(DefectFinding.confidenceThreshold * 100).round()}%, so "
             "nothing is being acted on. Check the face by eye, and mark "
-            "anything you find while tracing it.",
+            "anything you find while tracing it."
+            "${_scoreFootnote(analysis)}",
       );
     }
 
@@ -467,6 +469,23 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
           ),
       ],
     );
+  }
+
+  /// What the model's own numbers were, appended to a message that would
+  /// otherwise say "nothing" with no way to tell a genuinely clean surface
+  /// from a model that barely looked. Empty when there is nothing to show --
+  /// an unavailable detector reports no scores at all.
+  String _scoreFootnote(DefectAnalysis analysis) {
+    if (analysis.scores.isEmpty) return "";
+
+    final ordered = analysis.scores.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    final parts = [
+      for (final e in ordered) "${e.key} ${(e.value * 100).round()}%",
+    ];
+
+    return "\n\nWhat it saw: ${parts.join(', ')}.";
   }
 
   /// One pill per kind of defect found, before the individual cards --
@@ -526,6 +545,12 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
         findings.map((f) => f.confidence).reduce((a, b) => a + b) /
             findings.length;
 
+    // The model's own word for this, not the app's internal vocabulary --
+    // the two agree for a knot and a crack, but the app's "Hole" finding is
+    // stored under the same kind as a rotten hollow core, whose display name
+    // is "Hollow". Showing the raw label is what makes it say "Hole".
+    final label = findings.first.rawLabel;
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -543,7 +568,7 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
           ),
           const SizedBox(width: 8),
           Text(
-            "${kind.label} × ${findings.length}",
+            "$label × ${findings.length}",
             style: TextStyle(
               fontWeight: FontWeight.bold,
               fontSize: 13,
@@ -620,7 +645,7 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  finding.kind.label,
+                  finding.rawLabel,
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 16,
