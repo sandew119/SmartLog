@@ -193,6 +193,55 @@ void main() {
       final raw = [List<double>.filled(5, 0), List<double>.filled(5, 0)]; // only 2 rows
       expect(decodeYoloDetectionHead(raw, numClasses: 3), isEmpty);
     });
+
+    test('scales normalised 0..1 box coordinates back up to pixel space', () {
+      final raw = emptyRaw(3, 5);
+      // A box dead centre of the frame, covering a third of it -- entirely
+      // plausible values if this export's box head is normalised, and
+      // otherwise a box roughly a third of a pixel wide.
+      plant(raw, 0, cx: 0.5, cy: 0.5, w: 0.3, h: 0.2, classIndex: 0, score: 0.8);
+
+      final found = decodeYoloDetectionHead(
+        raw,
+        numClasses: 3,
+        scoreThreshold: 0.25,
+        inputSize: 640,
+      );
+
+      expect(found.single.cx, closeTo(0.5 * 640, 1e-9));
+      expect(found.single.cy, closeTo(0.5 * 640, 1e-9));
+      expect(found.single.w, closeTo(0.3 * 640, 1e-9));
+      expect(found.single.h, closeTo(0.2 * 640, 1e-9));
+    });
+
+    test('leaves genuine pixel-space box coordinates alone', () {
+      final raw = emptyRaw(3, 5);
+      plant(raw, 0, cx: 300, cy: 200, w: 50, h: 60, classIndex: 0, score: 0.8);
+
+      final found = decodeYoloDetectionHead(
+        raw,
+        numClasses: 3,
+        scoreThreshold: 0.25,
+        inputSize: 640,
+      );
+
+      expect(found.single.cx, closeTo(300, 1e-9));
+      expect(found.single.w, closeTo(50, 1e-9));
+    });
+
+    test('autoScaleBoxes: false trusts whatever is in the box rows', () {
+      final raw = emptyRaw(3, 5);
+      plant(raw, 0, cx: 0.5, cy: 0.5, w: 0.3, h: 0.2, classIndex: 0, score: 0.8);
+
+      final found = decodeYoloDetectionHead(
+        raw,
+        numClasses: 3,
+        scoreThreshold: 0.25,
+        autoScaleBoxes: false,
+      );
+
+      expect(found.single.cx, closeTo(0.5, 1e-9));
+    });
   });
 
   group('strongestPerClass', () {

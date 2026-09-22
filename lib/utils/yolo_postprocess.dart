@@ -156,11 +156,28 @@ class Letterbox {
 /// if it is well above 1, applies a sigmoid to all of them. Guessing wrong
 /// here is cheap to notice (every detection reads as ~100% or as noise) and
 /// expensive to leave silent, so the check runs by default.
+///
+/// [autoScaleBoxes] exists for the same reason, aimed at rows 0-3 instead:
+/// the doc comment above claims those are pixel coordinates in the model's
+/// square, the standard convention, but this export's missing metadata
+/// cannot confirm it, and some export paths report normalised 0..1 box
+/// coordinates instead. Getting this wrong is much quieter than the sigmoid
+/// case -- a box that is 1/640th the size it should be still decodes, still
+/// letterboxes back onto the photo, and still produces a valid-looking
+/// [DefectFinding] with a real label and confidence, it just draws as a rect
+/// a fraction of a pixel wide, which is indistinguishable on screen from no
+/// box at all. A pixel-space box on a 640-square input routinely reaches
+/// into the hundreds; a normalised one never exceeds roughly 1. So this
+/// checks the largest magnitude across all four box rows, over every anchor,
+/// before thresholding, and multiplies back up by [inputSize] if it looks
+/// normalised.
 List<RawDetection> decodeYoloDetectionHead(
   List<List<double>> raw, {
   required int numClasses,
   double scoreThreshold = 0.25,
   bool autoSigmoid = true,
+  bool autoScaleBoxes = true,
+  int inputSize = 640,
 }) {
   if (raw.length < 4 + numClasses) return const [];
 
@@ -177,6 +194,20 @@ List<RawDetection> decodeYoloDetectionHead(
       }
     }
     needsSigmoid = peak > 1.5;
+  }
+
+  var boxScale = 1.0;
+
+  if (autoScaleBoxes) {
+    var peak = 0.0;
+    for (var c = 0; c < 4; c++) {
+      final row = raw[c];
+      for (var a = 0; a < row.length; a++) {
+        final magnitude = row[a].abs();
+        if (magnitude > peak) peak = magnitude;
+      }
+    }
+    if (peak > 0 && peak <= 3.0) boxScale = inputSize.toDouble();
   }
 
   final out = <RawDetection>[];
@@ -197,10 +228,10 @@ List<RawDetection> decodeYoloDetectionHead(
     if (bestScore < scoreThreshold) continue;
 
     out.add(RawDetection(
-      cx: raw[0][a],
-      cy: raw[1][a],
-      w: raw[2][a],
-      h: raw[3][a],
+      cx: raw[0][a] * boxScale,
+      cy: raw[1][a] * boxScale,
+      w: raw[2][a] * boxScale,
+      h: raw[3][a] * boxScale,
       classIndex: bestClass,
       score: bestScore,
     ));

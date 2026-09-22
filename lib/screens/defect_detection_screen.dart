@@ -453,7 +453,7 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _summaryStrip(analysis.actionable),
+        _summaryStrip(analysis.actionable, _impacts),
         if (_impacts.isNotEmpty)
           _banner(
             Icons.summarize,
@@ -489,12 +489,13 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
   }
 
   /// One pill per kind of defect found, before the individual cards --
-  /// "how many, of what, how sure" at a glance, for someone who wants the
-  /// headline before reading every box.
-  Widget _summaryStrip(List<DefectFinding> findings) {
-    final byKind = <LogDefectKind, List<DefectFinding>>{};
-    for (final f in findings) {
-      byKind.putIfAbsent(f.kind, () => []).add(f);
+  /// "how many, of what, how much wood it costs" at a glance, for someone
+  /// who wants the headline before reading every box.
+  Widget _summaryStrip(List<DefectFinding> findings, List<DefectImpact> impacts) {
+    final byKind = <LogDefectKind, List<(DefectFinding, DefectImpact?)>>{};
+    for (var i = 0; i < findings.length; i++) {
+      final impact = i < impacts.length ? impacts[i] : null;
+      byKind.putIfAbsent(findings[i].kind, () => []).add((findings[i], impact));
     }
 
     final kinds = byKind.keys.toList()
@@ -538,18 +539,44 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
     return DefectOverlayPainter.colourFor(DefectSeverity.low);
   }
 
-  Widget _kindPill(LogDefectKind kind, List<DefectFinding> findings) {
-    final colour = _kindColour(kind);
+  /// Share of the wood one finding costs -- the real measurement against the
+  /// traced face when there is one, otherwise the finding's own box against
+  /// the photo frame. The empty-state hint already tells the user to fill
+  /// the frame with timber, so the frame is a reasonable stand-in for "the
+  /// wood" when there is no traced outline to measure against exactly; it is
+  /// labelled differently below so the two are never confused for each
+  /// other.
+  double _coverageFraction(DefectFinding finding, DefectImpact? impact) {
+    if (impact != null) return impact.faceFraction;
 
-    final meanConfidence =
-        findings.map((f) => f.confidence).reduce((a, b) => a + b) /
-            findings.length;
+    final size = _imageSize;
+    if (size == null || size.width <= 0 || size.height <= 0) return 0;
+
+    final boxArea = finding.region.width * finding.region.height;
+    final frameArea = size.width * size.height;
+    if (frameArea <= 0) return 0;
+
+    return (boxArea / frameArea).clamp(0.0, 1.0);
+  }
+
+  Widget _kindPill(LogDefectKind kind, List<(DefectFinding, DefectImpact?)> items) {
+    final colour = _kindColour(kind);
 
     // The model's own word for this, not the app's internal vocabulary --
     // the two agree for a knot and a crack, but the app's "Hole" finding is
     // stored under the same kind as a rotten hollow core, whose display name
     // is "Hollow". Showing the raw label is what makes it say "Hole".
-    final label = findings.first.rawLabel;
+    final label = items.first.$1.rawLabel;
+
+    // How much wood this kind costs, not how sure the model was that it is
+    // there -- confidence is shown per finding below. Summed rather than
+    // averaged: two cracks each covering 2% of the face cost 4% of it
+    // between them, not 2%.
+    final measured = items.any((it) => it.$2 != null);
+    final totalCoverage = items.fold<double>(
+      0,
+      (sum, it) => sum + _coverageFraction(it.$1, it.$2),
+    );
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -568,7 +595,7 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
           ),
           const SizedBox(width: 8),
           Text(
-            "$label × ${findings.length}",
+            "$label × ${items.length}",
             style: TextStyle(
               fontWeight: FontWeight.bold,
               fontSize: 13,
@@ -577,7 +604,9 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
           ),
           const SizedBox(width: 6),
           Text(
-            "avg ${(meanConfidence * 100).round()}%",
+            measured
+                ? "${(totalCoverage * 100).toStringAsFixed(1)}% of the face"
+                : "~${(totalCoverage * 100).toStringAsFixed(1)}% of frame",
             style: TextStyle(
               fontSize: 12,
               color: colour.withValues(alpha: 0.85),

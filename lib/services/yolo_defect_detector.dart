@@ -41,6 +41,13 @@ import 'defect_detector.dart';
 ///   applies a sigmoid itself if they look like logits (see its own
 ///   comment), so a mismatch here degrades to a wrong confidence number
 ///   rather than a silently broken model.
+/// - **Box coordinate scale.** Same function, same auto-detection idea,
+///   applied to whether the box rows are pixel-space (assumed) or
+///   normalised 0..1 (some export paths use this instead). Guessing wrong
+///   here is far quieter than the sigmoid case: findings still come back
+///   with real labels and confidence, the boxes just draw too small to see.
+///   If percentages and labels look right on a scan but no box or highlight
+///   ever appears on the photo, this is the first thing to suspect.
 ///
 /// A second candidate file existed alongside this one, same architecture
 /// signature, no more metadata than this one has. This one was chosen
@@ -185,6 +192,7 @@ class YoloDefectDetector implements DefectDetector {
       raw,
       numClasses: numClasses,
       scoreThreshold: scoreThreshold,
+      inputSize: _inputSize,
     );
 
     final kept = nonMaxSuppression(candidates, iouThreshold: iouThreshold);
