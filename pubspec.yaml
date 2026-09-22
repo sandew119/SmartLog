@@ -77,3 +77,8 @@ flutter:
     # not there looks exactly like a model that found nothing.
     - assets/models/wood_defect_labels.txt
     - assets/models/wood_defect.tflite
+    # The YOLO detector -- Crack, Hole, Knot, one box per defect. Same rule
+    # as above: not committed, must be in place before building. See
+    # yolo_defect_detector.dart for what happens when it is missing.
+    - assets/models/wood_defect_yolo_labels.txt
+    - assets/models/wood_defect_yolo.tflite

@@ -9,8 +9,8 @@ import 'services/google_auth_service.dart';
 import 'services/cloud_sync_coordinator.dart';
 import 'services/cloud_sync_engine.dart';
 import 'services/session_timeout_service.dart';
-import 'services/tflite_defect_detector.dart';
 import 'services/user_preferences_service.dart';
+import 'services/yolo_defect_detector.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -38,8 +38,11 @@ Future<void> main() async {
 
   // Installs the defect model if the build carries one. Silent when it does
   // not: a build without the model is supported, and everything except
-  // automatic detection behaves identically.
-  unawaited(TFLiteDefectDetector.installIfAvailable());
+  // automatic detection behaves identically. YOLO, not the earlier ResNet
+  // classifier: it reports one box per defect instead of one label for the
+  // whole photo -- see yolo_defect_detector.dart for what is and is not
+  // confirmed about the exported file itself.
+  unawaited(YoloDefectDetector.installIfAvailable());
 
   // Signs out a session left open on a phone put down in a yard. Wired here
   // rather than in the auth screens so there is exactly one place that
