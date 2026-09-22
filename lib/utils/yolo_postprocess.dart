@@ -31,8 +31,7 @@ class RawDetection {
     required this.score,
   });
 
-  Rect get boxInModelSpace =>
-      Rect.fromLTWH(cx - w / 2, cy - h / 2, w, h);
+  Rect get boxInModelSpace => Rect.fromLTWH(cx - w / 2, cy - h / 2, w, h);
 
   RawDetection copyWith({double? score}) => RawDetection(
         cx: cx,
@@ -335,13 +334,233 @@ List<RawDetection> nonMaxSuppression(
 
 double _iou(Rect a, Rect b) {
   final intersection = a.intersect(b);
-  final interArea =
-      intersection.width <= 0 || intersection.height <= 0
-          ? 0.0
-          : intersection.width * intersection.height;
+  final interArea = intersection.width <= 0 || intersection.height <= 0
+      ? 0.0
+      : intersection.width * intersection.height;
 
   final union = a.width * a.height + b.width * b.height - interArea;
   if (union <= 0) return 0;
 
   return interArea / union;
+}
+
+/// Intersection over the *smaller* box's area.
+///
+/// IoU cannot see a small box sitting wholly inside a big one: a knot boxed
+/// once tightly and once loosely scores an IoU of perhaps 0.2, well under any
+/// sensible suppression threshold, and is then counted twice. Measured
+/// against the smaller box, full containment reads as 1.0, which is what it
+/// is -- the same defect.
+double intersectionOverSmaller(Rect a, Rect b) {
+  final intersection = a.intersect(b);
+  if (intersection.width <= 0 || intersection.height <= 0) return 0;
+
+  final smaller = math.min(a.width * a.height, b.width * b.height);
+  if (smaller <= 0) return 0;
+
+  return (intersection.width * intersection.height) / smaller;
+}
+
+double intersectionOverUnion(Rect a, Rect b) => _iou(a, b);
+
+/// One region of the photograph the model is run on.
+///
+/// The model sees a 640-pixel square. A phone photograph is 4000 pixels
+/// across, so squeezing all of it into one pass shrinks a thumbnail-sized
+/// knot to three or four pixels -- below what the network can resolve, and
+/// the reason small defects were going unreported. Running it again on
+/// overlapping quarters of the photo gives each of those defects six times
+/// the pixels, while the whole-image pass still catches the long cracks that
+/// cross tile borders.
+class ScanTile {
+  /// Where this tile sits in the original photograph, in its pixels.
+  final Rect region;
+
+  /// True for the single pass over the entire image.
+  final bool isWholeImage;
+
+  const ScanTile(this.region, {this.isWholeImage = false});
+}
+
+/// The passes to run over a [width] x [height] photograph.
+///
+/// Always the whole image first. Tiles are added only when the photo is big
+/// enough for them to add detail -- below [minTileSide] pixels on the short
+/// side a quarter of the image holds no more information than the whole
+/// image already gave the model, so tiling would only cost time.
+///
+/// Tiles overlap by [overlap] of their own size so a defect straddling the
+/// middle of the photo is whole in at least one of them.
+List<ScanTile> planScanTiles({
+  required int width,
+  required int height,
+  int grid = 2,
+  double overlap = 0.25,
+  int minTileSide = 900,
+}) {
+  final tiles = <ScanTile>[
+    ScanTile(
+      Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+      isWholeImage: true,
+    ),
+  ];
+
+  if (width <= 0 || height <= 0 || grid < 2) return tiles;
+
+  // Each tile covers 1/grid of the image plus its share of the overlap.
+  final tileWidth = width / (grid - (grid - 1) * overlap);
+  final tileHeight = height / (grid - (grid - 1) * overlap);
+
+  if (math.min(tileWidth, tileHeight) < minTileSide) return tiles;
+
+  final stepX = tileWidth * (1 - overlap);
+  final stepY = tileHeight * (1 - overlap);
+
+  for (var row = 0; row < grid; row++) {
+    for (var col = 0; col < grid; col++) {
+      final left = math.min(col * stepX, width - tileWidth);
+      final top = math.min(row * stepY, height - tileHeight);
+
+      tiles.add(
+        ScanTile(
+          Rect.fromLTWH(
+            left.roundToDouble(),
+            top.roundToDouble(),
+            tileWidth.roundToDouble(),
+            tileHeight.roundToDouble(),
+          ),
+        ),
+      );
+    }
+  }
+
+  return tiles;
+}
+
+/// A detection already mapped back into the original photograph.
+class PlacedDetection {
+  final Rect box;
+  final int classIndex;
+  final double score;
+
+  /// How many passes reported this same defect. A defect found by the whole
+  /// image *and* by a tile is more trustworthy than one seen once.
+  final int support;
+
+  const PlacedDetection({
+    required this.box,
+    required this.classIndex,
+    required this.score,
+    this.support = 1,
+  });
+
+  PlacedDetection copyWith({Rect? box, double? score, int? support}) =>
+      PlacedDetection(
+        box: box ?? this.box,
+        classIndex: classIndex,
+        score: score ?? this.score,
+        support: support ?? this.support,
+      );
+}
+
+/// Merges the findings of every pass into one list of distinct defects.
+///
+/// Three kinds of duplicate have to go, or the count is wrong:
+///
+/// 1. **The same defect seen by two passes** -- the whole image and a tile,
+///    or two overlapping tiles. Same class, overlapping boxes.
+/// 2. **A box inside a box.** The model often boxes one knot twice, tightly
+///    and loosely. IoU misses this; [intersectionOverSmaller] does not.
+/// 3. **One defect given two names.** A dark knot with a check running out
+///    of it can come back as both "Knot" and "Crack" on nearly the same box.
+///    That is one thing on the log, so only the more confident label stays.
+///
+/// Survivors are grown to cover what they absorbed (so a crack found in two
+/// halves by two tiles is reported whole), and their score is the best of the
+/// group, nudged up slightly for every extra pass that agreed.
+List<PlacedDetection> mergeDetections(
+  List<PlacedDetection> detections, {
+  double sameClassIou = 0.4,
+  double sameClassContainment = 0.5,
+  double crossClassIou = 0.6,
+  double crossClassContainment = 0.85,
+  int maxResults = 40,
+}) {
+  if (detections.isEmpty) return const [];
+
+  final sorted = [...detections]..sort((a, b) => b.score.compareTo(a.score));
+  final used = List<bool>.filled(sorted.length, false);
+  final merged = <PlacedDetection>[];
+
+  for (var i = 0; i < sorted.length; i++) {
+    if (used[i]) continue;
+    used[i] = true;
+
+    var keep = sorted[i];
+    var box = keep.box;
+    var support = keep.support;
+
+    for (var j = i + 1; j < sorted.length; j++) {
+      if (used[j]) continue;
+
+      final other = sorted[j];
+      final iou = _iou(keep.box, other.box);
+      final ios = intersectionOverSmaller(keep.box, other.box);
+
+      final sameClass = other.classIndex == keep.classIndex;
+
+      final duplicate = sameClass
+          ? (iou >= sameClassIou || ios >= sameClassContainment)
+          : (iou >= crossClassIou || ios >= crossClassContainment);
+
+      if (!duplicate) continue;
+
+      used[j] = true;
+
+      if (sameClass) {
+        // Only grow toward a box that genuinely overlaps; a small box wholly
+        // inside this one adds nothing, and a union with a loose outlier
+        // would balloon the box past the defect.
+        final union = box.expandToInclude(other.box);
+        final growth = (union.width * union.height) /
+            math.max(box.width * box.height, 1e-9);
+
+        if (growth <= 1.8) box = union;
+        support += other.support;
+      }
+    }
+
+    // A small, bounded reward for agreement. Never above 1, and never enough
+    // to lift noise over the line on repetition alone.
+    final boosted = math.min(
+      1.0,
+      keep.score + 0.04 * (support - 1).clamp(0, 3),
+    );
+
+    merged.add(keep.copyWith(box: box, score: boosted, support: support));
+  }
+
+  merged.sort((a, b) => b.score.compareTo(a.score));
+
+  return merged.length > maxResults ? merged.sublist(0, maxResults) : merged;
+}
+
+/// Drops boxes too small to be a real defect at this resolution.
+///
+/// A box a few pixels across on a 12-megapixel photo is sensor noise or a
+/// speck of sawdust, and every one that survives adds one to a count the
+/// user is going to hold the app to.
+List<PlacedDetection> dropSpecks(
+  List<PlacedDetection> detections, {
+  required int imageWidth,
+  required int imageHeight,
+  double minSideFraction = 0.006,
+}) {
+  final minSide =
+      math.max(4.0, math.min(imageWidth, imageHeight) * minSideFraction);
+
+  return [
+    for (final d in detections)
+      if (d.box.width >= minSide && d.box.height >= minSide) d,
+  ];
 }

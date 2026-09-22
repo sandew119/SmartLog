@@ -79,7 +79,7 @@ class DefectImpact {
     if (lostCubicFeet > 0.001) {
       buffer.write(
         "On this log it costs about ${lostCubicFeet.toStringAsFixed(2)} ft³ "
-        "of boards (${lostPercent.toStringAsFixed(0)}% of the yield)",
+        "of boards",
       );
 
       if (lostValue > 0) {

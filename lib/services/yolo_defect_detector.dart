@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' show Rect;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:image/image.dart' as img;
@@ -10,89 +14,68 @@ import 'defect_detector.dart';
 /// Runs a YOLO object detector on the device: Crack, Hole and Knot, each
 /// with its own box, however many appear in one photo.
 ///
-/// Reports one [DefectFinding] per defect found, each boxed to where it
-/// actually is -- not one label for the whole photo, which is what a
-/// whole-image classifier is stuck with. That is what the overlay needs to
-/// draw more than a single heatmap, and what [DefectImpactAnalyser] needs
-/// to measure a defect against the traced face rather than assuming it
-/// covers the whole log.
+/// **Why several passes.** The network sees a 640-pixel square. A phone
+/// photo is ~4000 pixels across, so one pass over the whole frame shrinks a
+/// thumb-sized knot to a few pixels -- below what the model can resolve, and
+/// the reason small defects were being missed. Large photos are therefore
+/// scanned five times: once whole (for long cracks that cross the frame) and
+/// once per overlapping quarter (for everything small). The passes are
+/// merged in `yolo_postprocess.dart`, which also removes the duplicates that
+/// used to inflate the count: the same defect seen twice, a box inside a
+/// box, and one defect reported under two names.
 ///
-/// All the arithmetic -- letterboxing, decoding the head, non-max
-/// suppression -- lives in `yolo_postprocess.dart`, apart from the
-/// interpreter and the `image` package, so it can be checked against scenes
-/// built by hand. This class is deliberately thin: prepare a frame, run it,
-/// hand the raw tensor to that arithmetic, turn what comes back into
-/// [DefectFinding]s.
+/// **Why a byte buffer.** Frames go to the interpreter as one flat
+/// `Float32List` instead of nested Dart lists. The nested form was converted
+/// element by element -- 1.2 million conversions per pass -- which is most
+/// of what made a scan slow.
 ///
-/// **What could not be confirmed off-device.** The `.tflite` this reads
-/// carries no class names or training metadata at all -- its only metadata
-/// entries are `min_runtime_version` and `keep_stablehlo_constant`, which
-/// mark it as converted through Google's AI Edge / StableHLO path rather
-/// than Ultralytics' own `model.export()`, which would have embedded them.
-/// So two things below are the standard convention for a YOLOv8-and-later
-/// detection head, not a fact this file states about itself:
+/// **Why an isolate.** Inference runs through [IsolateInterpreter] so the
+/// scanning animation keeps moving. If that path ever fails or stalls, the
+/// detector falls back to running on the calling thread for the rest of the
+/// session: a frozen second is better than no answer.
 ///
-/// - **Class order.** The labels file beside this class declares Crack,
-///   Hole, Knot, in that order, matching how every training run this project
-///   used named its classes. If a scan reliably calls a crack a knot or a
-///   hole a crack, this is the first thing to check -- reorder the labels
-///   file, not this code.
-/// - **Sigmoid.** [decodeYoloDetectionHead] checks the raw scores and
-///   applies a sigmoid itself if they look like logits (see its own
-///   comment), so a mismatch here degrades to a wrong confidence number
-///   rather than a silently broken model.
-/// - **Box coordinate scale.** Same function, same auto-detection idea,
-///   applied to whether the box rows are pixel-space (assumed) or
-///   normalised 0..1 (some export paths use this instead). Guessing wrong
-///   here is far quieter than the sigmoid case: findings still come back
-///   with real labels and confidence, the boxes just draw too small to see.
-///   If percentages and labels look right on a scan but no box or highlight
-///   ever appears on the photo, this is the first thing to suspect.
-///
-/// A second candidate file existed alongside this one, same architecture
-/// signature, no more metadata than this one has. This one was chosen
-/// because its filename -- `best.tflite` -- is Ultralytics' own default name
-/// for a training run's best checkpoint, which the other file's name was
-/// not; that is a naming convention, not a measurement, and was the only
-/// signal available to choose between them without a device to test on.
-///
-/// None of this has been checked against a labelled photo on a real device.
-/// Do that first: photograph a log with a crack you can see by eye, confirm
-/// the box lands on it and is labelled "Crack" -- and if it is not, the
-/// class order is the most likely reason and a three-line fix.
+/// **What could not be confirmed off-device.** The `.tflite` carries no
+/// class names or training metadata (an AI Edge / StableHLO export, not
+/// Ultralytics' own). Class order comes from the labels file (Crack, Hole,
+/// Knot); whether scores need a sigmoid and whether boxes are normalised are
+/// both detected from the numbers themselves -- see
+/// [decodeYoloDetectionHead]. If a scan reliably calls a crack a knot, the
+/// labels file order is the first thing to check.
 class YoloDefectDetector implements DefectDetector {
   YoloDefectDetector({
     this.modelAsset = "assets/models/best.tflite",
     this.labelsAsset = "assets/models/best_labels.txt",
-    this.scoreThreshold = 0.10,
+    this.scoreThreshold = 0.20,
     this.iouThreshold = 0.45,
+    this.tiled = true,
   });
 
   final String modelAsset;
   final String labelsAsset;
 
-  /// Below this a candidate box is not reported at all. Deliberately looser
-  /// than [DefectFinding.confidenceThreshold] (0.60, which decides what the
-  /// cutting engine acts on) -- a finding between the two is still shown to
-  /// the user, with the "not sure enough to act on it" message the screen
-  /// already has for exactly this case.
+  /// Below this a candidate box is not reported at all.
   ///
-  /// Set low on purpose. A missed defect is a worse failure than an extra
-  /// low-confidence one someone has to dismiss by eye, and with no device to
-  /// calibrate this against, erring toward showing weak signal rather than
-  /// discarding it is the safer direction to be wrong in. Turn it back up
-  /// once real photos say this is too permissive, not before.
+  /// Findings between this and [DefectFinding.confidenceThreshold] are shown
+  /// and counted but marked "check by eye", and the cutting engine does not
+  /// act on them until a person confirms them. The old floor of 0.10 let
+  /// through enough noise that the count stopped meaning anything; the tiled
+  /// passes lift genuine small defects well clear of this line instead.
   final double scoreThreshold;
 
   final double iouThreshold;
 
+  /// Whether large photos get the extra per-quarter passes.
+  final bool tiled;
+
   Interpreter? _interpreter;
+  IsolateInterpreter? _isolate;
+  bool _isolateBroken = false;
+
   List<String> _labels = const [];
 
-  /// The model's own square input size, read from its input tensor once
-  /// loaded rather than assumed, so a re-export at a different resolution
-  /// does not silently letterbox to the wrong size.
+  /// Read from the model's own input tensor, not assumed.
   int _inputSize = 640;
+  int _anchors = 0;
 
   @override
   String get name => _interpreter == null
@@ -119,18 +102,15 @@ class YoloDefectDetector implements DefectDetector {
       final inputShape = interpreter.getInputTensor(0).shape;
       final outputShape = interpreter.getOutputTensor(0).shape;
 
-      // NCHW: [batch, channels, height, width]. Confirmed from this file's
-      // own declared input tensor, not assumed -- an export that instead
-      // produces NHWC would otherwise feed the network a scrambled frame
-      // that still runs, still returns numbers, and is simply wrong.
+      // NCHW: [batch, channels, height, width], confirmed from this file's
+      // own declared input tensor. An NHWC export would otherwise be fed a
+      // scrambled frame that still runs and is simply wrong.
       if (inputShape.length != 4 || inputShape[1] != 3) {
         interpreter.close();
         throw StateError(
           "Expected an NCHW [1, 3, size, size] input, got $inputShape.",
         );
       }
-
-      final declaredSize = inputShape[2];
 
       if (outputShape.length != 3) {
         interpreter.close();
@@ -139,8 +119,7 @@ class YoloDefectDetector implements DefectDetector {
         );
       }
 
-      final channels = outputShape[1];
-      final expectedClasses = channels - 4;
+      final expectedClasses = outputShape[1] - 4;
 
       if (expectedClasses != _labels.length) {
         interpreter.close();
@@ -152,8 +131,19 @@ class YoloDefectDetector implements DefectDetector {
         );
       }
 
-      _inputSize = declaredSize;
+      _inputSize = inputShape[2];
+      _anchors = outputShape[2];
       _interpreter = interpreter;
+
+      try {
+        _isolate = await IsolateInterpreter.create(
+          address: interpreter.address,
+          debugName: "SmartLogDefects",
+        );
+      } catch (error) {
+        debugPrint("Defect model will run on the main isolate: $error");
+        _isolate = null;
+      }
     } catch (error) {
       // Not fatal. The screen reports that no model is installed, and
       // marking defects by hand still works.
@@ -163,131 +153,172 @@ class YoloDefectDetector implements DefectDetector {
   }
 
   @override
-  Future<DefectAnalysis> analyse(img.Image image) async {
+  Future<DefectAnalysis> analyse(
+    img.Image image, {
+    ScanProgress? onProgress,
+  }) async {
     final interpreter = _interpreter;
     if (interpreter == null) return const DefectAnalysis();
 
     final watch = Stopwatch()..start();
 
-    final letterbox = Letterbox.fit(
-      inputSize: _inputSize,
-      originalWidth: image.width,
-      originalHeight: image.height,
-    );
+    final tiles = tiled
+        ? planScanTiles(width: image.width, height: image.height)
+        : [
+            ScanTile(
+              Rect.fromLTWH(
+                0,
+                0,
+                image.width.toDouble(),
+                image.height.toDouble(),
+              ),
+              isWholeImage: true,
+            ),
+          ];
 
-    final input = _prepare(image, letterbox);
+    onProgress?.call(0, tiles.length);
+
+    // Every tile is cut, resized and packed in one background hop, so the
+    // full-resolution photo crosses the isolate boundary once, not per tile.
+    final frames = await compute(
+      prepareYoloFrames,
+      YoloFrameRequest(
+        image: image,
+        inputSize: _inputSize,
+        regions: [
+          for (final t in tiles)
+            [t.region.left, t.region.top, t.region.width, t.region.height],
+        ],
+      ),
+    );
 
     final numClasses = _labels.length;
-    final numAnchors = interpreter.getOutputTensor(0).shape[2];
+    final channels = 4 + numClasses;
 
-    final output = [
-      List.generate(4 + numClasses, (_) => List<double>.filled(numAnchors, 0)),
-    ];
+    final placed = <PlacedDetection>[];
+    final scores = <String, double>{};
 
-    interpreter.run(input, output);
+    for (var t = 0; t < tiles.length; t++) {
+      final tile = tiles[t];
+      final frame = frames[t];
 
-    final raw = output[0];
+      final flat = await _infer(interpreter, frame.pixels, channels);
 
-    final candidates = decodeYoloDetectionHead(
-      raw,
-      numClasses: numClasses,
-      scoreThreshold: scoreThreshold,
-      inputSize: _inputSize,
+      final raw = [
+        for (var c = 0; c < channels; c++)
+          Float32List.sublistView(flat, c * _anchors, (c + 1) * _anchors),
+      ];
+
+      final candidates = decodeYoloDetectionHead(
+        raw,
+        numClasses: numClasses,
+        scoreThreshold: scoreThreshold,
+        inputSize: _inputSize,
+      );
+
+      final kept = nonMaxSuppression(candidates, iouThreshold: iouThreshold);
+
+      final letterbox = Letterbox(
+        inputSize: _inputSize,
+        scale: frame.scale,
+        padX: frame.padX,
+        padY: frame.padY,
+        originalWidth: tile.region.width.round(),
+        originalHeight: tile.region.height.round(),
+      );
+
+      for (final d in kept) {
+        final local = letterbox.toOriginal(d.boxInModelSpace);
+
+        placed.add(
+          PlacedDetection(
+            box: local.shift(tile.region.topLeft),
+            classIndex: d.classIndex,
+            score: d.score,
+          ),
+        );
+      }
+
+      // The model's own best guess per class from the whole-image pass, kept
+      // for diagnostics. Not shown to the user as a number.
+      if (tile.isWholeImage) {
+        final strongest = strongestPerClass(raw, numClasses: numClasses);
+
+        for (final entry in strongest.entries) {
+          if (entry.key >= 0 && entry.key < _labels.length) {
+            scores[_labels[entry.key]] = entry.value;
+          }
+        }
+      }
+
+      onProgress?.call(t + 1, tiles.length);
+    }
+
+    final merged = dropSpecks(
+      mergeDetections(placed),
+      imageWidth: image.width,
+      imageHeight: image.height,
     );
-
-    final kept = nonMaxSuppression(candidates, iouThreshold: iouThreshold);
 
     watch.stop();
 
     final findings = <DefectFinding>[];
-    final scores = <String, double>{};
 
-    for (final d in kept) {
+    for (final d in merged) {
       final label = _labels[d.classIndex];
       final healthy = DefectLabelMap.isHealthy(label);
       final kind = DefectLabelMap.resolve(label);
 
-      // See the class comment on DefectLabelMap.resolve for why an unmapped
-      // label falls back to crack rather than being dropped: silently
-      // discarding a finding because the vocabulary disagrees would look
-      // exactly like a clean scan.
+      // An unmapped label falls back to crack rather than being dropped:
+      // silently discarding a finding because the vocabulary disagrees would
+      // look exactly like a clean scan.
       final resolved = kind ?? LogDefectKind.crack;
 
       findings.add(DefectFinding(
         kind: healthy ? LogDefectKind.knot : resolved,
         rawLabel: label,
         confidence: d.score,
-        region: letterbox.toOriginal(d.boxInModelSpace),
+        region: d.box,
         isHealthy: healthy,
+        support: d.support,
       ));
-    }
-
-    // The model's own best guess for each class, whether or not anything
-    // crossed the threshold. See strongestPerClass's own comment for why:
-    // this is what turns "no defects found" into a number someone can act
-    // on, rather than a dead end that looks the same whether the model
-    // barely looked or looked hard and stayed unconvinced.
-    final strongest = strongestPerClass(raw, numClasses: numClasses);
-
-    for (final entry in strongest.entries) {
-      if (entry.key >= 0 && entry.key < _labels.length) {
-        scores[_labels[entry.key]] = entry.value;
-      }
     }
 
     return DefectAnalysis(
       findings: findings,
       scores: scores,
       inferenceMs: watch.elapsedMilliseconds,
+      passes: tiles.length,
     );
   }
 
-  /// Resizes to fit inside the model's square input and pads the rest with
-  /// mid-grey (114, 114, 114) -- Ultralytics' own padding colour, so a photo
-  /// goes through the same transform the training images did in Roboflow --
-  /// then hands over NCHW float32, 0..1 per channel.
-  ///
-  /// [box] is returned by the caller for undoing this exact transform on the
-  /// way back out; building it here and there from two different formulas
-  /// is how a resize and its inverse quietly stop matching.
-  List<List<List<List<double>>>> _prepare(img.Image image, Letterbox box) {
-    final canvas = img.Image(width: box.inputSize, height: box.inputSize);
-    img.fill(canvas, color: img.ColorRgb8(114, 114, 114));
+  /// One forward pass, off the main isolate when possible.
+  Future<Float32List> _infer(
+    Interpreter interpreter,
+    Float32List input,
+    int channels,
+  ) async {
+    final output = Float32List(channels * _anchors);
 
-    if (box.resizedWidth > 0 && box.resizedHeight > 0) {
-      final resized = img.copyResize(
-        image,
-        width: box.resizedWidth,
-        height: box.resizedHeight,
-        interpolation: img.Interpolation.linear,
-      );
+    final isolate = _isolate;
 
-      img.compositeImage(
-        canvas,
-        resized,
-        dstX: box.padX.round(),
-        dstY: box.padY.round(),
-      );
-    }
-
-    final size = box.inputSize;
-
-    final red = List.generate(size, (_) => List<double>.filled(size, 0));
-    final green = List.generate(size, (_) => List<double>.filled(size, 0));
-    final blue = List.generate(size, (_) => List<double>.filled(size, 0));
-
-    for (var y = 0; y < size; y++) {
-      for (var x = 0; x < size; x++) {
-        final p = canvas.getPixel(x, y);
-        red[y][x] = p.r / 255.0;
-        green[y][x] = p.g / 255.0;
-        blue[y][x] = p.b / 255.0;
+    if (isolate != null && !_isolateBroken) {
+      try {
+        // The isolate interpreter has no error channel: if inference dies
+        // over there, the await below would wait for ever. The timeout is
+        // what turns that into a fallback instead of a hung screen.
+        await isolate
+            .run(input.buffer, output.buffer)
+            .timeout(const Duration(seconds: 20));
+        return output;
+      } catch (error) {
+        debugPrint("Isolate inference failed, using main isolate: $error");
+        _isolateBroken = true;
       }
     }
 
-    return [
-      [red, green, blue],
-    ];
+    interpreter.run(input.buffer, output.buffer);
+    return output;
   }
 
   @override
@@ -301,6 +332,8 @@ class YoloDefectDetector implements DefectDetector {
 
   @override
   void dispose() {
+    _isolate?.close();
+    _isolate = null;
     _interpreter?.close();
     _interpreter = null;
   }
@@ -318,4 +351,143 @@ class YoloDefectDetector implements DefectDetector {
       DefectDetection.instance = detector;
     }
   }
+}
+
+/// What [prepareYoloFrames] needs: the photo, the model's input size, and
+/// each region to scan as `[left, top, width, height]` in photo pixels.
+class YoloFrameRequest {
+  final img.Image image;
+  final int inputSize;
+  final List<List<double>> regions;
+
+  const YoloFrameRequest({
+    required this.image,
+    required this.inputSize,
+    required this.regions,
+  });
+}
+
+/// One region, letterboxed and packed for the network.
+class YoloFrame {
+  /// NCHW float32, 0..1 per channel.
+  final Float32List pixels;
+
+  /// The letterbox that was applied, so boxes can be walked back out.
+  final double scale;
+  final double padX;
+  final double padY;
+
+  const YoloFrame({
+    required this.pixels,
+    required this.scale,
+    required this.padX,
+    required this.padY,
+  });
+}
+
+/// Cuts each region out of the photo, fits it inside the model's square
+/// without distortion, pads the rest with Ultralytics' mid-grey (114), and
+/// packs it as NCHW float32.
+///
+/// Top level so it runs in a background isolate.
+List<YoloFrame> prepareYoloFrames(YoloFrameRequest request) {
+  final size = request.inputSize;
+  final plane = size * size;
+  const pad = 114 / 255.0;
+
+  final frames = <YoloFrame>[];
+
+  for (final region in request.regions) {
+    final left = region[0].round().clamp(0, request.image.width - 1);
+    final top = region[1].round().clamp(0, request.image.height - 1);
+    final width = region[2].round().clamp(1, request.image.width - left);
+    final height = region[3].round().clamp(1, request.image.height - top);
+
+    final wholeImage = left == 0 &&
+        top == 0 &&
+        width == request.image.width &&
+        height == request.image.height;
+
+    final source = wholeImage
+        ? request.image
+        : img.copyCrop(
+            request.image,
+            x: left,
+            y: top,
+            width: width,
+            height: height,
+          );
+
+    final letterbox = Letterbox.fit(
+      inputSize: size,
+      originalWidth: width,
+      originalHeight: height,
+    );
+
+    final pixels = Float32List(3 * plane)..fillRange(0, 3 * plane, pad);
+
+    final targetWidth = math.max(1, letterbox.resizedWidth);
+    final targetHeight = math.max(1, letterbox.resizedHeight);
+
+    // Averaging, not point-sampling, when shrinking a lot: a hairline crack
+    // survives a 6x reduction as a faint dark line instead of vanishing
+    // between the sampled pixels.
+    final shrink = width / targetWidth;
+
+    final resized = img.copyResize(
+      source,
+      width: targetWidth,
+      height: targetHeight,
+      interpolation:
+          shrink > 2 ? img.Interpolation.average : img.Interpolation.linear,
+    );
+
+    // Flat 8-bit RGB whatever the source was -- a 16-bit or palette PNG from
+    // the gallery would otherwise hand back bytes of a different layout.
+    final working = (resized.format != img.Format.uint8 ||
+            resized.hasPalette ||
+            resized.numChannels != 3)
+        ? resized.convert(format: img.Format.uint8, numChannels: 3)
+        : resized;
+
+    final rgb = working.getBytes(order: img.ChannelOrder.rgb);
+
+    final offsetX = letterbox.padX.round();
+    final offsetY = letterbox.padY.round();
+
+    var i = 0;
+
+    for (var y = 0; y < resized.height; y++) {
+      final row = (y + offsetY) * size;
+      if (y + offsetY >= size) break;
+
+      for (var x = 0; x < resized.width; x++) {
+        final column = x + offsetX;
+
+        if (column >= size) {
+          i += 3;
+          continue;
+        }
+
+        final at = row + column;
+
+        pixels[at] = rgb[i] / 255.0;
+        pixels[plane + at] = rgb[i + 1] / 255.0;
+        pixels[2 * plane + at] = rgb[i + 2] / 255.0;
+
+        i += 3;
+      }
+    }
+
+    frames.add(
+      YoloFrame(
+        pixels: pixels,
+        scale: letterbox.scale,
+        padX: letterbox.padX,
+        padY: letterbox.padY,
+      ),
+    );
+  }
+
+  return frames;
 }

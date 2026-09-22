@@ -5,6 +5,26 @@ import 'package:image/image.dart' as img;
 import '../models/log_defect.dart';
 import '../models/log_face_outline.dart';
 
+/// How sure the scan is about one finding, in words rather than a number.
+///
+/// A percentage invited the wrong question -- "is 47% good?" -- and nobody
+/// in a yard can act on it. What they can act on is: this one is certain,
+/// that one needs a look.
+enum DefectCertainty {
+  /// Clear enough that cutting plans route boards around it.
+  confirmed,
+
+  /// Seen, but faint. Shown and counted, marked for a check by eye.
+  possible,
+}
+
+extension DefectCertaintyInfo on DefectCertainty {
+  String get label => switch (this) {
+        DefectCertainty.confirmed => "Clear",
+        DefectCertainty.possible => "Check by eye",
+      };
+}
+
 /// One thing the model found.
 ///
 /// Deliberately carries a [Rect] rather than a circle, even though the app's
@@ -31,12 +51,17 @@ class DefectFinding {
   /// not look" must not appear the same to the user.
   final bool isHealthy;
 
+  /// How many scan passes reported this same defect -- the whole photo and
+  /// each overlapping tile vote independently.
+  final int support;
+
   const DefectFinding({
     required this.kind,
     required this.rawLabel,
     required this.confidence,
     required this.region,
     this.isHealthy = false,
+    this.support = 1,
   });
 
   /// Below this the specification says a prediction is uncertain, and the
@@ -44,6 +69,16 @@ class DefectFinding {
   static const double confidenceThreshold = 0.60;
 
   bool get isConfident => confidence >= confidenceThreshold;
+
+  DefectCertainty get certainty =>
+      isConfident ? DefectCertainty.confirmed : DefectCertainty.possible;
+
+  /// The name to show: the model's own word, title-cased.
+  String get displayLabel {
+    final raw = rawLabel.trim();
+    if (raw.isEmpty) return kind.label;
+    return raw[0].toUpperCase() + raw.substring(1);
+  }
 
   /// The app-native form, in the same coordinate space as the outline.
   ///
@@ -80,6 +115,9 @@ class DefectAnalysis {
 
   final int inferenceMs;
 
+  /// How many regions of the photo the model was run over.
+  final int passes;
+
   const DefectAnalysis({
     this.findings = const [],
     this.scores = const {},
@@ -87,9 +125,18 @@ class DefectAnalysis {
     this.activationWidth = 0,
     this.activationHeight = 0,
     this.inferenceMs = 0,
+    this.passes = 1,
   });
 
   bool get isClean => findings.isEmpty || findings.every((f) => f.isHealthy);
+
+  /// Every real defect the scan reported, clear or faint -- what the photo
+  /// shows and what the count counts. The two used to disagree: the photo
+  /// boxed everything, the count only included the clear ones.
+  List<DefectFinding> get defects => [
+        for (final f in findings)
+          if (!f.isHealthy) f
+      ];
 
   /// Only the findings the engine is allowed to act on.
   List<DefectFinding> get actionable => [
@@ -97,9 +144,18 @@ class DefectAnalysis {
           if (!f.isHealthy && f.isConfident) f
       ];
 
+  /// Faint findings that need a person to confirm or dismiss them.
+  List<DefectFinding> get needsReview => [
+        for (final f in findings)
+          if (!f.isHealthy && !f.isConfident) f
+      ];
+
   /// True when the model answered but was not sure enough to act.
   bool get isUncertain => findings.isNotEmpty && !isClean && actionable.isEmpty;
 }
+
+/// Reports how far through a multi-pass scan the detector is.
+typedef ScanProgress = void Function(int done, int total);
 
 /// Finds flaws on a log's cut face.
 ///
@@ -122,7 +178,7 @@ abstract class DefectDetector {
 
   Future<void> load();
 
-  Future<DefectAnalysis> analyse(img.Image image);
+  Future<DefectAnalysis> analyse(img.Image image, {ScanProgress? onProgress});
 
   /// Convenience for callers that only want defects in outline space.
   Future<List<LogDefect>> detect({
@@ -150,7 +206,10 @@ class NoAutomaticDefectDetector implements DefectDetector {
   Future<void> load() async {}
 
   @override
-  Future<DefectAnalysis> analyse(img.Image image) async =>
+  Future<DefectAnalysis> analyse(
+    img.Image image, {
+    ScanProgress? onProgress,
+  }) async =>
       const DefectAnalysis();
 
   @override
