@@ -1,8 +1,11 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../services/report_service.dart';
+import '../theme/app_theme.dart';
+import '../widgets/ui_kit.dart';
 
 class ReportPreviewScreen extends StatefulWidget {
   final File pdfFile;
@@ -27,6 +30,16 @@ class _ReportPreviewScreenState extends State<ReportPreviewScreen> {
 
   String get _fileName => widget.pdfFile.uri.pathSegments.last;
 
+  String get _sizeLabel {
+    try {
+      final bytes = widget.pdfFile.lengthSync();
+      if (bytes < 1024 * 1024) return "${(bytes / 1024).toStringAsFixed(0)} KB";
+      return "${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB";
+    } catch (_) {
+      return "";
+    }
+  }
+
   Future<void> _print() async {
     setState(() => _busy = true);
 
@@ -39,6 +52,7 @@ class _ReportPreviewScreenState extends State<ReportPreviewScreen> {
 
   Future<void> _share() async {
     setState(() => _busy = true);
+    HapticFeedback.lightImpact();
 
     try {
       await _reportService.shareReport(widget.pdfFile);
@@ -57,73 +71,122 @@ class _ReportPreviewScreenState extends State<ReportPreviewScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colour = _isCsv ? AppTheme.success : AppTheme.severityHigh;
+
     return Scaffold(
       appBar: AppBar(
         title: Text(_isCsv ? "Spreadsheet Ready" : "Report Generated"),
         centerTitle: true,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          children: [
-            const SizedBox(height: 20),
-            Icon(
-              _isCsv ? Icons.table_chart : Icons.picture_as_pdf,
-              size: 90,
-              color: _isCsv ? Colors.green : Colors.red,
-            ),
-            const SizedBox(height: 20),
-            Text(
-              _isCsv
-                  ? "CSV spreadsheet created."
-                  : "PDF report generated successfully.",
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              _isCsv
-                  ? "One row per log. Share it to yourself and open it in "
-                      "Excel or Google Sheets."
-                  : "Ready to print or send to a buyer.",
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.grey, fontSize: 13),
-            ),
-            const SizedBox(height: 14),
-            Text(
-              widget.pdfFile.path,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.grey, fontSize: 11),
-            ),
-            const SizedBox(height: 34),
-            SizedBox(
-              width: double.infinity,
-              height: 55,
-              child: ElevatedButton.icon(
-                onPressed: _busy ? null : _share,
-                icon: const Icon(Icons.share),
-                label: const Text("Share / Download"),
-              ),
-            ),
-            // Printing is a PDF operation. Offering it for a spreadsheet
-            // would be a button that cannot succeed.
-            if (!_isCsv) ...[
-              const SizedBox(height: 15),
-              SizedBox(
-                width: double.infinity,
-                height: 55,
-                child: OutlinedButton.icon(
-                  onPressed: _busy ? null : _print,
-                  icon: const Icon(Icons.print),
-                  label: const Text("Print"),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
+        children: [
+          FadeSlideIn(
+            child: Center(
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0.6, end: 1),
+                duration: const Duration(milliseconds: 500),
+                curve: Curves.elasticOut,
+                builder: (context, scale, child) =>
+                    Transform.scale(scale: scale, child: child),
+                child: Container(
+                  width: 112,
+                  height: 112,
+                  decoration: BoxDecoration(
+                    color: colour.withValues(alpha: 0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    _isCsv
+                        ? Icons.table_chart_rounded
+                        : Icons.picture_as_pdf_rounded,
+                    size: 56,
+                    color: colour,
+                  ),
                 ),
               ),
-            ],
+            ),
+          ),
+          const SizedBox(height: 22),
+          Text(
+            _isCsv
+                ? "CSV spreadsheet created."
+                : "PDF report generated successfully.",
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+              letterSpacing: -0.3,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _isCsv
+                ? "One row per log. Share it to yourself and open it in "
+                    "Excel or Google Sheets."
+                : "Ready to print or send to a buyer.",
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: AppTheme.textSecondary, fontSize: 14),
+          ),
+          const SizedBox(height: 24),
+          SurfaceCard(
+            shadow: false,
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                IconBadge(
+                  icon: _isCsv
+                      ? Icons.description_outlined
+                      : Icons.insert_drive_file_outlined,
+                  color: colour,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _fileName,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      if (_sizeLabel.isNotEmpty)
+                        Text(
+                          _sizeLabel,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AppTheme.textTertiary,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 28),
+          PrimaryAction(
+            label: "Share / Download",
+            icon: Icons.ios_share_rounded,
+            busy: _busy,
+            onPressed: _share,
+          ),
+          // Printing is a PDF operation. Offering it for a spreadsheet
+          // would be a button that cannot succeed.
+          if (!_isCsv) ...[
+            const SizedBox(height: 12),
+            PrimaryAction(
+              label: "Print",
+              icon: Icons.print_outlined,
+              outlined: true,
+              onPressed: _busy ? null : _print,
+            ),
           ],
-        ),
+        ],
       ),
     );
   }
