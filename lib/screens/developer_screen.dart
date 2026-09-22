@@ -472,7 +472,6 @@ class _DeveloperScreenState extends State<DeveloperScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xffF5F7FA),
       appBar: AppBar(
         title: const Text("Developer"),
         centerTitle: true,

@@ -664,7 +664,6 @@ class _CuttingResultScreenState extends State<CuttingResultScreen> {
     final plan = _plan;
 
     return Scaffold(
-      backgroundColor: const Color(0xffF5F7FA),
       appBar: AppBar(
         centerTitle: true,
         title: const Text("Cutting Plan"),

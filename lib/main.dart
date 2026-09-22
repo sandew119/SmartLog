@@ -11,6 +11,7 @@ import 'services/cloud_sync_engine.dart';
 import 'services/session_timeout_service.dart';
 import 'services/user_preferences_service.dart';
 import 'services/yolo_defect_detector.dart';
+import 'theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -71,10 +72,8 @@ class SmartLogApp extends StatelessWidget {
     return MaterialApp(
       title: 'Smart Log',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.green,
-      ),
+      theme: AppTheme.lightTheme,
+      themeMode: ThemeMode.light,
       home: home ?? const AuthGate(),
     );
   }

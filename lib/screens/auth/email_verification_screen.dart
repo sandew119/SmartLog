@@ -114,7 +114,6 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
     }
 
     return Scaffold(
-      backgroundColor: const Color(0xffF5F7FA),
       appBar: AppBar(
         title: const Text("Verify Email"),
         centerTitle: true,
