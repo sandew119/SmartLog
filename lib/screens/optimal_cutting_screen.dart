@@ -4,12 +4,14 @@ import 'dart:math' as math;
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/log_defect.dart';
 import '../models/log_face_outline.dart';
 import '../services/lidar_service.dart';
 import '../services/sawing_engine.dart';
 import '../services/user_preferences_service.dart';
+import '../theme/app_theme.dart';
 import '../widgets/cutting_setup_sheet.dart';
 import '../widgets/image_source_sheet.dart';
 import 'cutting_result_screen.dart';
@@ -323,7 +325,6 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xffF5F7FA),
       appBar: AppBar(
         centerTitle: true,
         title: const Text("Optimal Cutting"),
@@ -347,19 +348,37 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
   }
 
   Widget _buildPlanningOverlay() {
-    return const ColoredBox(
-      color: Colors.black54,
+    return ColoredBox(
+      color: Colors.black.withValues(alpha: 0.55),
       child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(color: Colors.white),
-            SizedBox(height: 16),
-            Text(
-              "Working out the best way to cut this log…",
-              style: TextStyle(color: Colors.white, fontSize: 15),
-            ),
-          ],
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 40),
+          padding: const EdgeInsets.fromLTRB(24, 26, 24, 22),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(AppTheme.radiusLarge),
+          ),
+          child: const Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 34,
+                height: 34,
+                child: CircularProgressIndicator(strokeWidth: 3),
+              ),
+              SizedBox(height: 16),
+              Text(
+                "Planning the cut",
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+              ),
+              SizedBox(height: 6),
+              Text(
+                "Working out the best way to cut this log…",
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -367,22 +386,21 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
 
   Widget _buildModeSelect() {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SizedBox(height: 10),
-          const Text(
+          Text(
             "How would you like to measure the log?",
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.headlineSmall,
           ),
           const SizedBox(height: 8),
           const Text(
-            "A photo of the log is required for LiDAR scanning. For manual entry, taking a photo is recommended but optional.",
-            style: TextStyle(color: Colors.grey),
-            textAlign: TextAlign.center,
+            "A photo of the log is required for LiDAR scanning. For manual "
+            "entry, taking a photo is recommended but optional.",
+            style: TextStyle(color: AppTheme.textSecondary, height: 1.4),
           ),
-          const SizedBox(height: 30),
+          const SizedBox(height: 24),
           _modeCard(
             title: "Scan with LiDAR",
             subtitle: _checkingLiDAR
@@ -393,17 +411,46 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
             icon: Icons.sensors,
             enabled: !_checkingLiDAR,
             highlighted: _lidarAvailable,
+            badge: _lidarAvailable ? "PRO" : null,
             onTap: _openLiDARFlow,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 14),
           _modeCard(
             title: "Manual Measurements",
             subtitle:
                 "Enter the log's diameter and length yourself, with an optional photo.",
             icon: Icons.rule,
             enabled: true,
-            highlighted: true,
+            highlighted: !_lidarAvailable,
             onTap: _openManualFlow,
+          ),
+          const SizedBox(height: 24),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: AppTheme.primary.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(AppTheme.radius),
+            ),
+            child: const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.tips_and_updates_outlined,
+                    color: AppTheme.primaryBright, size: 20),
+                SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    "A photo lets SmartLog trace the real shape of the face — "
+                    "oval and flat-sided logs yield more than a circle "
+                    "would suggest.",
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.4,
+                      color: AppTheme.textSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -417,53 +464,135 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
     required bool enabled,
     required bool highlighted,
     required VoidCallback onTap,
+    String? badge,
   }) {
     return Opacity(
-      opacity: enabled ? 1 : 0.6,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(20),
-        onTap: enabled ? onTap : null,
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: highlighted ? Colors.green : Colors.grey.shade300,
-              width: highlighted ? 2 : 1,
+      opacity: enabled ? 1 : 0.55,
+      child: Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(AppTheme.radiusLarge - 4),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AppTheme.radiusLarge - 4),
+          onTap: enabled
+              ? () {
+                  HapticFeedback.selectionClick();
+                  onTap();
+                }
+              : null,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppTheme.radiusLarge - 4),
+              border: Border.all(
+                color: highlighted ? AppTheme.primaryBright : AppTheme.line,
+                width: highlighted ? 1.6 : 1,
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 54,
+                  height: 54,
+                  decoration: BoxDecoration(
+                    gradient: highlighted ? AppTheme.brandGradient : null,
+                    color: highlighted ? null : AppTheme.surfaceMuted,
+                    borderRadius: BorderRadius.circular(17),
+                  ),
+                  child: Icon(
+                    icon,
+                    color: highlighted ? Colors.white : AppTheme.textSecondary,
+                    size: 26,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              title,
+                              style: const TextStyle(
+                                fontSize: 17,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          if (badge != null) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 7,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                gradient: AppTheme.timberGradient,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                badge,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          color: AppTheme.textSecondary,
+                          fontSize: 13,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right_rounded,
+                    color: AppTheme.textTertiary),
+              ],
             ),
           ),
-          child: Row(
-            children: [
-              CircleAvatar(
-                radius: 28,
-                backgroundColor: Colors.green.withValues(alpha: 0.12),
-                child: Icon(icon, color: Colors.green, size: 28),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitle,
-                      style: const TextStyle(color: Colors.grey),
-                    ),
-                  ],
-                ),
-              ),
-              const Icon(Icons.chevron_right, color: Colors.grey),
-            ],
-          ),
+        ),
+      ),
+    );
+  }
+
+  /// The live camera, filling a square without being stretched into it.
+  ///
+  /// This is the fix for the skewed picture. The preview used to be dropped
+  /// straight into a fixed 300 x 300 box, and a tight square constraint
+  /// overrides CameraPreview's own aspect ratio -- so a 4:3 sensor image was
+  /// squashed into 1:1 and every log looked oval. Here the preview is laid
+  /// out at its true proportions and then *cropped* to the square, the way
+  /// every camera app's viewfinder works.
+  Widget _livePreview(CameraController controller) {
+    final preview = controller.value.previewSize;
+
+    // previewSize is reported sensor-side, i.e. landscape. On a phone held
+    // upright the picture is the other way round.
+    final width = preview == null
+        ? 3.0
+        : math.min(preview.width, preview.height).toDouble();
+    final height = preview == null
+        ? 4.0
+        : math.max(preview.width, preview.height).toDouble();
+
+    return ClipRect(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: width,
+          height: height,
+          child: CameraPreview(controller),
         ),
       ),
     );
@@ -473,112 +602,124 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
     Widget cameraPreview;
 
     if (_cameraLoading) {
-      cameraPreview = const Center(child: CircularProgressIndicator());
+      cameraPreview = const Center(
+        child: CircularProgressIndicator(color: Colors.white),
+      );
     } else if (!_cameraReady) {
       cameraPreview = const Center(
-        child: Text(
-          "Camera not available",
-          style: TextStyle(color: Colors.white),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.no_photography_outlined,
+                color: Colors.white54, size: 36),
+            SizedBox(height: 10),
+            Text(
+              "Camera not available",
+              style: TextStyle(color: Colors.white70),
+            ),
+          ],
         ),
       );
     } else if (_imageCaptured) {
-      cameraPreview = ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: Image.file(File(_capturedImage!.path), fit: BoxFit.cover),
+      // The whole photo, letterboxed: what gets traced is exactly this.
+      cameraPreview = Image.file(
+        File(_capturedImage!.path),
+        fit: BoxFit.contain,
       );
     } else {
-      cameraPreview = ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: CameraPreview(_cameraController!),
-      );
+      cameraPreview = _livePreview(_cameraController!);
     }
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
       child: Column(
         children: [
-          const SizedBox(height: 15),
-          const Text(
-            "Photograph the Log (Optional)",
-            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          Text(
+            _imageCaptured ? "Photo captured" : "Photograph the cut end",
+            style: Theme.of(context).textTheme.headlineSmall,
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Text(
             _imageCaptured
-                ? "Image captured successfully."
-                : "Align the timber log inside the guide, or skip below.",
-            style: const TextStyle(color: Colors.grey),
+                ? "Trace the face next, or retake if it isn't sharp."
+                : "Fill the circle with the log's cut face. A photo is "
+                    "optional — you can skip it below.",
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: AppTheme.textSecondary, height: 1.4),
           ),
-          const SizedBox(height: 20),
-          Center(
-            child: SizedBox(
-              width: 320,
-              height: 320,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Container(
-                    width: 300,
-                    height: 300,
-                    decoration: BoxDecoration(
-                      color: Colors.black,
-                      borderRadius: BorderRadius.circular(20),
+          const SizedBox(height: 18),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final side = math.min(constraints.maxWidth, 420.0);
+
+              return Center(
+                child: SizedBox(
+                  width: side,
+                  height: side,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(AppTheme.radiusLarge),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        const ColoredBox(color: Color(0xFF0E1411)),
+                        cameraPreview,
+                        if (!_imageCaptured && _cameraReady)
+                          const IgnorePointer(
+                            child: CustomPaint(painter: _ViewfinderPainter()),
+                          ),
+                      ],
                     ),
-                    child: cameraPreview,
                   ),
-                  if (!_imageCaptured)
-                    IgnorePointer(
-                      child: Container(
-                        width: 240,
-                        height: 240,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.green, width: 4),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 22),
+          if (_imageCaptured)
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _retake,
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text("Retake"),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: () async {
+                      final traced =
+                          await _traceFace(File(_capturedImage!.path));
+                      if (traced && mounted) await _plan();
+                    },
+                    icon: const Icon(Icons.gesture_rounded),
+                    label: const Text("Trace Face"),
+                  ),
+                ),
+              ],
+            )
+          else
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _roundAction(
+                  icon: Icons.photo_library_outlined,
+                  label: "Gallery",
+                  onTap: _chooseFromGallery,
+                ),
+                _ShutterButton(
+                  enabled: _cameraReady,
+                  onTap: _captureImage,
+                ),
+                _roundAction(
+                  icon: Icons.keyboard_alt_outlined,
+                  label: "Manual",
+                  onTap: () => _plan(),
+                ),
+              ],
             ),
-          ),
-          const SizedBox(height: 25),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: _imageCaptured
-                ? Row(
-                    children: [
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: _retake,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text("Retake"),
-                        ),
-                      ),
-                      const SizedBox(width: 15),
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: () async {
-                            final traced =
-                                await _traceFace(File(_capturedImage!.path));
-                            if (traced && mounted) await _plan();
-                          },
-                          icon: const Icon(Icons.gesture),
-                          label: const Text("Trace Face"),
-                        ),
-                      ),
-                    ],
-                  )
-                : SizedBox(
-                    width: double.infinity,
-                    height: 55,
-                    child: ElevatedButton.icon(
-                      onPressed: _cameraReady ? _captureImage : null,
-                      icon: const Icon(Icons.camera_alt),
-                      label: const Text("Capture Log Surface"),
-                    ),
-                  ),
-          ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 14),
           if (!_imageCaptured) ...[
             // A log photographed earlier is just as good as one taken now,
             // and the measuring often happens back at a desk rather than in
@@ -597,4 +738,163 @@ class _OptimalCuttingScreenState extends State<OptimalCuttingScreen> {
       ),
     );
   }
+
+  Widget _roundAction({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Material(
+          color: Colors.white,
+          shape: const CircleBorder(side: BorderSide(color: AppTheme.line)),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onTap,
+            child: SizedBox(
+              width: 52,
+              height: 52,
+              child: Icon(icon, color: AppTheme.primary),
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: AppTheme.textSecondary,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The capture button: a white disc in a ring, like a camera's own.
+class _ShutterButton extends StatefulWidget {
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _ShutterButton({required this.enabled, required this.onTap});
+
+  @override
+  State<_ShutterButton> createState() => _ShutterButtonState();
+}
+
+class _ShutterButtonState extends State<_ShutterButton> {
+  bool _down = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: "Capture Log Surface",
+      child: GestureDetector(
+        onTapDown: widget.enabled ? (_) => setState(() => _down = true) : null,
+        onTapCancel: () => setState(() => _down = false),
+        onTapUp: widget.enabled ? (_) => setState(() => _down = false) : null,
+        onTap: widget.enabled
+            ? () {
+                HapticFeedback.mediumImpact();
+                widget.onTap();
+              }
+            : null,
+        child: Opacity(
+          opacity: widget.enabled ? 1 : 0.4,
+          child: Container(
+            width: 78,
+            height: 78,
+            padding: const EdgeInsets.all(5),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: AppTheme.primary, width: 3),
+            ),
+            child: AnimatedScale(
+              scale: _down ? 0.88 : 1,
+              duration: const Duration(milliseconds: 110),
+              child: Container(
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: AppTheme.brandGradient,
+                ),
+                child: const Icon(
+                  Icons.camera_alt_rounded,
+                  color: Colors.white,
+                  size: 28,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Dims everything outside a centred circle and marks the corners, so the
+/// user knows exactly where the cut face should sit.
+class _ViewfinderPainter extends CustomPainter {
+  const _ViewfinderPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final centre = size.center(Offset.zero);
+    final radius = size.shortestSide * 0.4;
+
+    final scrim = Path()
+      ..fillType = PathFillType.evenOdd
+      ..addRect(Offset.zero & size)
+      ..addOval(Rect.fromCircle(center: centre, radius: radius));
+
+    canvas.drawPath(
+        scrim, Paint()..color = Colors.black.withValues(alpha: 0.38));
+
+    canvas.drawCircle(
+      centre,
+      radius,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5
+        ..color = Colors.white.withValues(alpha: 0.9),
+    );
+
+    // Corner brackets.
+    const inset = 16.0;
+    const arm = 26.0;
+    final bracket = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round
+      ..color = Colors.white;
+
+    for (final corner in [
+      const Offset(inset, inset),
+      Offset(size.width - inset, inset),
+      Offset(inset, size.height - inset),
+      Offset(size.width - inset, size.height - inset),
+    ]) {
+      final dx = corner.dx < size.width / 2 ? arm : -arm;
+      final dy = corner.dy < size.height / 2 ? arm : -arm;
+
+      canvas.drawLine(corner, corner + Offset(dx, 0), bracket);
+      canvas.drawLine(corner, corner + Offset(0, dy), bracket);
+    }
+
+    // A small crosshair where the pith should be.
+    final cross = Paint()
+      ..strokeWidth = 1.5
+      ..color = Colors.white.withValues(alpha: 0.7);
+
+    canvas.drawLine(
+        centre - const Offset(8, 0), centre + const Offset(8, 0), cross);
+    canvas.drawLine(
+        centre - const Offset(0, 8), centre + const Offset(0, 8), cross);
+  }
+
+  @override
+  bool shouldRepaint(_ViewfinderPainter oldDelegate) => false;
 }

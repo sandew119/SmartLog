@@ -1,16 +1,19 @@
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 
 import '../models/log_defect.dart';
 import '../models/log_face_outline.dart';
 import '../services/log_face_detector.dart';
+import '../theme/app_theme.dart';
 import '../utils/ellipse_fit.dart';
 import '../utils/fitted_image_mapper.dart';
+import '../utils/snapshot.dart';
 
 /// What the user traced, in inches, ready for the cutting engine.
 class LogFaceTraceResult {
@@ -128,6 +131,135 @@ _TraceResponse? _traceInBackground(_TraceRequest request) {
   );
 }
 
+/// A small copy of the photo, prepared once when the screen opens, so a tap
+/// only has to *look* -- not decode a 12-megapixel JPEG first.
+///
+/// That decode was most of what a tap cost: every single tap read the file
+/// from disk and decoded it in pure Dart before detection could even start,
+/// which is seconds on a phone. The copy is drawn from the same decoded
+/// image Flutter is showing, so its orientation cannot disagree with what
+/// the user is looking at.
+class _WorkingImage {
+  final Uint8List rgba;
+  final int width;
+  final int height;
+
+  /// Full-resolution pixels per working pixel.
+  final double scaleX;
+  final double scaleY;
+
+  const _WorkingImage({
+    required this.rgba,
+    required this.width,
+    required this.height,
+    required this.scaleX,
+    required this.scaleY,
+  });
+}
+
+class _WorkingTraceRequest {
+  final _WorkingImage work;
+
+  /// The tap, in full-resolution photo pixels.
+  final double x;
+  final double y;
+
+  final int fullWidth;
+  final int fullHeight;
+
+  const _WorkingTraceRequest(
+    this.work,
+    this.x,
+    this.y,
+    this.fullWidth,
+    this.fullHeight,
+  );
+}
+
+/// Detection on the prepared working copy.
+///
+/// If the tap itself does not give a confident face -- a thumb on the dark
+/// pith, a crack or a knot -- the search is retried from a few points around
+/// it and the most consistent face wins. That is what makes a sloppy tap
+/// still land on the right boundary.
+_TraceResponse? _traceWorking(_WorkingTraceRequest request) {
+  final work = request.work;
+
+  final image = img.Image.fromBytes(
+    width: work.width,
+    height: work.height,
+    bytes: work.rgba.buffer,
+    bytesOffset: work.rgba.offsetInBytes,
+    rowStride: work.width * 4,
+    numChannels: 4,
+    order: img.ChannelOrder.rgba,
+  );
+
+  final tap = Offset(request.x / work.scaleX, request.y / work.scaleY);
+
+  LogFaceDetection? best = LogFaceDetector.detect(image: image, centre: tap);
+
+  if (best == null || !best.isReliable) {
+    final step = math.min(work.width, work.height) * 0.06;
+
+    for (final offset in const [
+      Offset(1, 0),
+      Offset(-1, 0),
+      Offset(0, 1),
+      Offset(0, -1),
+    ]) {
+      final seed = tap + offset * step;
+
+      if (seed.dx < 0 ||
+          seed.dy < 0 ||
+          seed.dx >= work.width ||
+          seed.dy >= work.height) {
+        continue;
+      }
+
+      final candidate = LogFaceDetector.detect(image: image, centre: seed);
+      if (candidate == null) continue;
+
+      if (best == null || candidate.confidence > best.confidence) {
+        best = candidate;
+      }
+
+      if (best.confidence >= 0.8) break;
+    }
+  }
+
+  if (best == null) return null;
+
+  final ellipse = best.ellipse;
+  final points = best.outline.points;
+
+  final adjust = <double>[];
+  for (var i = 0; i < points.length; i++) {
+    final angle = 2 * math.pi * i / points.length;
+    final base = ellipse.radiusAt(angle);
+
+    adjust.add(
+      base <= 0 ? 1.0 : (points[i] - ellipse.centre).distance / base,
+    );
+  }
+
+  // Back to full resolution. The working copy keeps the photo's proportions,
+  // so one scale serves both axes; averaging absorbs the rounding.
+  final scale = (work.scaleX + work.scaleY) / 2;
+
+  return _TraceResponse(
+    centreX: ellipse.centre.dx * work.scaleX,
+    centreY: ellipse.centre.dy * work.scaleY,
+    semiMajor: ellipse.semiMajor * scale,
+    semiMinor: ellipse.semiMinor * scale,
+    rotation: ellipse.rotation,
+    radialAdjust: adjust,
+    confidence: best.confidence,
+    imageWidth: request.fullWidth,
+    imageHeight: request.fullHeight,
+  );
+}
+
 /// The six things a finger can grab.
 enum _Handle { centre, majorPlus, majorMinus, minorPlus, minorMinus, rotate }
 
@@ -178,6 +310,17 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
   bool _imageLoadFailed = false;
 
   bool _busy = false;
+
+  /// The small copy a tap is traced on. Null until ready, and the old
+  /// full-decode path stands in if a tap arrives before it is.
+  _WorkingImage? _work;
+
+  /// Where the finger went down, for the pulse drawn while detection runs.
+  Offset? _tapAt;
+
+  /// Bumped on every new trace, so the outline animates in fresh each time.
+  int _traceGeneration = 0;
+
   _EditMode _mode = _EditMode.shape;
   LogDefectKind _defectKind = LogDefectKind.rot;
 
@@ -241,15 +384,24 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
 
     listener = ImageStreamListener(
       (info, _) {
+        // Held past this callback, so it needs its own handle.
+        final image = info.image.clone();
+
         stream.removeListener(listener);
-        if (!mounted) return;
+
+        if (!mounted) {
+          image.dispose();
+          return;
+        }
 
         setState(() {
           _imageSize = Size(
-            info.image.width.toDouble(),
-            info.image.height.toDouble(),
+            image.width.toDouble(),
+            image.height.toDouble(),
           );
         });
+
+        _prepareWorkingCopy(image);
       },
       onError: (error, stack) {
         stream.removeListener(listener);
@@ -260,6 +412,35 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
     );
 
     stream.addListener(listener);
+  }
+
+  /// Shrinks the displayed photo to the detector's own working size, on the
+  /// GPU, and keeps the raw pixels. Runs once, while the user is still
+  /// looking at the photo, so the first tap is already fast.
+  Future<void> _prepareWorkingCopy(ui.Image image) async {
+    try {
+      final small = await downscale(image, 512);
+      final data = await small.toByteData(format: ui.ImageByteFormat.rawRgba);
+
+      final work = data == null
+          ? null
+          : _WorkingImage(
+              rgba: data.buffer.asUint8List(),
+              width: small.width,
+              height: small.height,
+              scaleX: image.width / small.width,
+              scaleY: image.height / small.height,
+            );
+
+      if (!identical(small, image)) small.dispose();
+
+      if (!mounted || work == null) return;
+      _work = work;
+    } catch (_) {
+      // The full-decode path still works; it is only slower.
+    } finally {
+      image.dispose();
+    }
   }
 
   @override
@@ -296,44 +477,77 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
       [for (var i = 0; i < _segments; i++) _outlinePoint(i)];
 
   Future<void> _traceFrom(Offset imagePoint) async {
-    setState(() => _busy = true);
+    HapticFeedback.selectionClick();
 
-    final bytes = await widget.photo.readAsBytes();
+    setState(() {
+      _busy = true;
+      _tapAt = imagePoint;
+    });
 
-    final response = await compute(
-      _traceInBackground,
-      _TraceRequest(bytes, imagePoint.dx, imagePoint.dy),
-    );
+    final work = _work;
+    final size = _imageSize;
+
+    _TraceResponse? response;
+
+    if (work != null && size != null) {
+      response = await compute(
+        _traceWorking,
+        _WorkingTraceRequest(
+          work,
+          imagePoint.dx,
+          imagePoint.dy,
+          size.width.round(),
+          size.height.round(),
+        ),
+      );
+    } else {
+      final bytes = await widget.photo.readAsBytes();
+
+      response = await compute(
+        _traceInBackground,
+        _TraceRequest(bytes, imagePoint.dx, imagePoint.dy),
+      );
+    }
 
     if (!mounted) return;
 
     if (response == null) {
-      setState(() => _busy = false);
+      setState(() {
+        _busy = false;
+        _tapAt = null;
+      });
+      HapticFeedback.heavyImpact();
       _toast(
-          "Couldn't read the log face there. Try tapping nearer the middle.");
+          "Couldn't find the log face there. Tap nearer the middle of the cut end.");
       return;
     }
+
+    HapticFeedback.mediumImpact();
 
     // The size Flutter reports stays authoritative, because that is what the
     // photo is actually painted at. If the decoder disagrees the outline
     // would be drawn against a different coordinate space than the picture
     // underneath it, so say so rather than showing a subtly wrong overlay.
+    final traced = response;
+
     final displayed = _imageSize;
     final decodedMismatch = displayed != null &&
-        (displayed.width.round() != response.imageWidth ||
-            displayed.height.round() != response.imageHeight);
+        (displayed.width.round() != traced.imageWidth ||
+            displayed.height.round() != traced.imageHeight);
 
     setState(() {
       _busy = false;
-      _confidence = response.confidence;
+      _tapAt = null;
+      _traceGeneration++;
+      _confidence = traced.confidence;
       _shape = Ellipse(
-        centre: Offset(response.centreX, response.centreY),
-        semiMajor: response.semiMajor,
-        semiMinor: response.semiMinor,
-        rotation: response.rotation,
+        centre: Offset(traced.centreX, traced.centreY),
+        semiMajor: traced.semiMajor,
+        semiMinor: traced.semiMinor,
+        rotation: traced.rotation,
       );
-      _radialAdjust = response.radialAdjust.length == _segments
-          ? List<double>.of(response.radialAdjust)
+      _radialAdjust = traced.radialAdjust.length == _segments
+          ? List<double>.of(traced.radialAdjust)
           : List<double>.filled(_segments, 1);
     });
 
@@ -661,35 +875,51 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
             children: [
               Image.file(widget.photo, fit: BoxFit.contain),
               if (_hasOutline && mapper != null)
-                CustomPaint(
-                  painter: _OutlinePainter(
-                    points: [
-                      for (final p in _outlinePoints()) mapper.toScreen(p),
-                    ],
-                    handles: _mode == _EditMode.shape
-                        ? {
-                            for (final entry
-                                in _handlePositions(mapper).entries)
-                              entry.key: mapper.toScreen(entry.value),
-                          }
-                        : const {},
-                    grabbed: _grabbed,
-                    brushCentre:
-                        _brushAt == null ? null : mapper.toScreen(_brushAt!),
-                    brushRadius: _brushRadius,
-                    defects: [
-                      for (final d in _defects)
-                        (
-                          centre: mapper.toScreen(d.centre),
-                          radius: mapper.lengthToScreen(d.radius),
-                          colour: _colourFor(d.kind),
-                        ),
-                    ],
+                TweenAnimationBuilder<double>(
+                  key: ValueKey(_traceGeneration),
+                  tween: Tween(begin: 0, end: 1),
+                  duration: const Duration(milliseconds: 380),
+                  curve: Curves.easeOutCubic,
+                  builder: (context, t, child) =>
+                      Opacity(opacity: t, child: child),
+                  child: CustomPaint(
+                    painter: _OutlinePainter(
+                      points: [
+                        for (final p in _outlinePoints()) mapper.toScreen(p),
+                      ],
+                      handles: _mode == _EditMode.shape
+                          ? {
+                              for (final entry
+                                  in _handlePositions(mapper).entries)
+                                entry.key: mapper.toScreen(entry.value),
+                            }
+                          : const {},
+                      grabbed: _grabbed,
+                      brushCentre:
+                          _brushAt == null ? null : mapper.toScreen(_brushAt!),
+                      brushRadius: _brushRadius,
+                      defects: [
+                        for (final d in _defects)
+                          (
+                            centre: mapper.toScreen(d.centre),
+                            radius: mapper.lengthToScreen(d.radius),
+                            colour: _colourFor(d.kind),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               if (!_hasOutline && !_busy) _buildPrompt(),
               if (_hasOutline) _buildModeHint(),
-              if (_busy)
+              if (_busy && _tapAt != null && mapper != null)
+                Positioned(
+                  left: mapper.toScreen(_tapAt!).dx - 60,
+                  top: mapper.toScreen(_tapAt!).dy - 60,
+                  width: 120,
+                  height: 120,
+                  child: const IgnorePointer(child: _TapPulse()),
+                )
+              else if (_busy)
                 const ColoredBox(
                   color: Colors.black54,
                   child: Center(child: CircularProgressIndicator()),
@@ -797,9 +1027,9 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          "The face didn't stand out clearly from its "
-                          "background (${(_confidence * 100).round()}% of the "
-                          "edge was found). Check the outline before going on.",
+                          "The edge wasn't clear all the way round. Check the "
+                          "outline — drag a dot, or use Refine where it "
+                          "misses the bark.",
                           style: const TextStyle(fontSize: 12),
                         ),
                       ),
@@ -968,6 +1198,82 @@ class _LogFaceTraceScreenState extends State<LogFaceTraceScreen> {
   }
 }
 
+/// Rings spreading out from where the user tapped, for the moment the face
+/// is being found. Feedback under the finger, not a spinner in the middle of
+/// the photo covering the thing being looked for.
+class _TapPulse extends StatefulWidget {
+  const _TapPulse();
+
+  @override
+  State<_TapPulse> createState() => _TapPulseState();
+}
+
+class _TapPulseState extends State<_TapPulse>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) => CustomPaint(
+        painter: _PulsePainter(_controller.value),
+      ),
+    );
+  }
+}
+
+class _PulsePainter extends CustomPainter {
+  final double t;
+
+  const _PulsePainter(this.t);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final centre = size.center(Offset.zero);
+    final maxRadius = size.shortestSide / 2;
+
+    for (final phase in const [0.0, 0.5]) {
+      final p = (t + phase) % 1.0;
+
+      canvas.drawCircle(
+        centre,
+        8 + (maxRadius - 8) * p,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.5
+          ..color = const Color(0xFF7CE0B0).withValues(alpha: (1 - p) * 0.9),
+      );
+    }
+
+    canvas.drawCircle(
+      centre,
+      6,
+      Paint()..color = Colors.white,
+    );
+    canvas.drawCircle(
+      centre,
+      6,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..color = AppTheme.primaryBright,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_PulsePainter old) => old.t != t;
+}
+
 class _OutlinePainter extends CustomPainter {
   final List<Offset> points;
 
@@ -1003,7 +1309,17 @@ class _OutlinePainter extends CustomPainter {
 
     canvas.drawPath(
       path,
-      Paint()..color = Colors.lightGreenAccent.withValues(alpha: 0.18),
+      Paint()..color = const Color(0xFF7CE0B0).withValues(alpha: 0.16),
+    );
+
+    // A dark keyline under the bright stroke, so the boundary reads on pale
+    // sawn timber and on dark bark alike.
+    canvas.drawPath(
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 5
+        ..color = Colors.black.withValues(alpha: 0.35),
     );
 
     canvas.drawPath(
@@ -1011,7 +1327,7 @@ class _OutlinePainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2.5
-        ..color = Colors.lightGreenAccent,
+        ..color = const Color(0xFF7CE0B0),
     );
 
     final rotateHandle = handles[_Handle.rotate];
@@ -1051,7 +1367,7 @@ class _OutlinePainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2
-          ..color = Colors.green.shade700,
+          ..color = AppTheme.primary,
       );
 
       final glyph = switch (handle) {
@@ -1070,7 +1386,7 @@ class _OutlinePainter extends CustomPainter {
             fontSize: radius * 1.3,
             fontFamily: glyph.fontFamily,
             package: glyph.fontPackage,
-            color: Colors.green.shade800,
+            color: AppTheme.primary,
           ),
         ),
       )..layout();
