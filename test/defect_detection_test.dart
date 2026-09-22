@@ -8,7 +8,7 @@ import 'package:smartlog2/models/log_face_outline.dart';
 import 'package:smartlog2/models/sawing_models.dart';
 import 'package:smartlog2/services/defect_detector.dart';
 import 'package:smartlog2/services/defect_impact.dart';
-import 'package:smartlog2/services/tflite_defect_detector.dart';
+import 'package:smartlog2/utils/ml_math.dart';
 import 'package:smartlog2/utils/image_quality.dart';
 
 /// A flat grey image: no detail at all, so the Laplacian variance is zero.

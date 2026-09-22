@@ -10,13 +10,12 @@ import 'defect_detector.dart';
 /// Runs a YOLO object detector on the device: Crack, Hole and Knot, each
 /// with its own box, however many appear in one photo.
 ///
-/// Unlike [TFLiteDefectDetector] -- built for a whole-image classifier that
-/// can only say one thing about an entire photograph -- this reads a real
-/// detection head and reports one [DefectFinding] per defect found, each
-/// boxed to where it actually is. That is what the overlay needs to draw
-/// more than a single heatmap, and what [DefectImpactAnalyser] needs to
-/// measure a defect against the traced face rather than assuming it covers
-/// the whole log.
+/// Reports one [DefectFinding] per defect found, each boxed to where it
+/// actually is -- not one label for the whole photo, which is what a
+/// whole-image classifier is stuck with. That is what the overlay needs to
+/// draw more than a single heatmap, and what [DefectImpactAnalyser] needs
+/// to measure a defect against the traced face rather than assuming it
+/// covers the whole log.
 ///
 /// All the arithmetic -- letterboxing, decoding the head, non-max
 /// suppression -- lives in `yolo_postprocess.dart`, apart from the
@@ -26,10 +25,12 @@ import 'defect_detector.dart';
 /// [DefectFinding]s.
 ///
 /// **What could not be confirmed off-device.** The `.tflite` this reads
-/// carries no Ultralytics metadata -- it did not go through `model.export()`'s
-/// own path, so two things below are the standard convention for a
-/// YOLOv8-and-later detection head rather than a fact read off the file
-/// itself:
+/// carries no class names or training metadata at all -- its only metadata
+/// entries are `min_runtime_version` and `keep_stablehlo_constant`, which
+/// mark it as converted through Google's AI Edge / StableHLO path rather
+/// than Ultralytics' own `model.export()`, which would have embedded them.
+/// So two things below are the standard convention for a YOLOv8-and-later
+/// detection head, not a fact this file states about itself:
 ///
 /// - **Class order.** The labels file beside this class declares Crack,
 ///   Hole, Knot, in that order, matching how every training run this project
@@ -41,14 +42,21 @@ import 'defect_detector.dart';
 ///   comment), so a mismatch here degrades to a wrong confidence number
 ///   rather than a silently broken model.
 ///
-/// Neither of these has been checked against a labelled photo on a real
-/// device. Do that once before trusting the results: photograph a log with
-/// a crack you can see by eye, confirm the box lands on it and is labelled
-/// "Crack".
+/// A second candidate file existed alongside this one, same architecture
+/// signature, no more metadata than this one has. This one was chosen
+/// because its filename -- `best.tflite` -- is Ultralytics' own default name
+/// for a training run's best checkpoint, which the other file's name was
+/// not; that is a naming convention, not a measurement, and was the only
+/// signal available to choose between them without a device to test on.
+///
+/// None of this has been checked against a labelled photo on a real device.
+/// Do that first: photograph a log with a crack you can see by eye, confirm
+/// the box lands on it and is labelled "Crack" -- and if it is not, the
+/// class order is the most likely reason and a three-line fix.
 class YoloDefectDetector implements DefectDetector {
   YoloDefectDetector({
-    this.modelAsset = "assets/models/wood_defect_yolo.tflite",
-    this.labelsAsset = "assets/models/wood_defect_yolo_labels.txt",
+    this.modelAsset = "assets/models/best.tflite",
+    this.labelsAsset = "assets/models/best_labels.txt",
     this.scoreThreshold = 0.25,
     this.iouThreshold = 0.45,
   });

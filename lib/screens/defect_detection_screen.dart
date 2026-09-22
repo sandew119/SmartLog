@@ -451,6 +451,7 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        _summaryStrip(analysis.actionable),
         if (_impacts.isNotEmpty)
           _banner(
             Icons.summarize,
@@ -465,6 +466,100 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
             i < _impacts.length ? _impacts[i] : null,
           ),
       ],
+    );
+  }
+
+  /// One pill per kind of defect found, before the individual cards --
+  /// "how many, of what, how sure" at a glance, for someone who wants the
+  /// headline before reading every box.
+  Widget _summaryStrip(List<DefectFinding> findings) {
+    final byKind = <LogDefectKind, List<DefectFinding>>{};
+    for (final f in findings) {
+      byKind.putIfAbsent(f.kind, () => []).add(f);
+    }
+
+    final kinds = byKind.keys.toList()
+      ..sort((a, b) => b.severity.compareTo(a.severity));
+
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.03),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            "Found ${findings.length} defect"
+            "${findings.length == 1 ? '' : 's'}",
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final kind in kinds) _kindPill(kind, byKind[kind]!),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A colour by how serious the kind is on its own, independent of any one
+  /// finding's size or position -- this is shown before the per-finding
+  /// impact analysis has necessarily run, or when there is no traced face
+  /// for it to run against at all.
+  static Color _kindColour(LogDefectKind kind) {
+    if (kind.severity >= 0.9) return DefectOverlayPainter.colourFor(DefectSeverity.high);
+    if (kind.severity >= 0.6) return DefectOverlayPainter.colourFor(DefectSeverity.medium);
+    return DefectOverlayPainter.colourFor(DefectSeverity.low);
+  }
+
+  Widget _kindPill(LogDefectKind kind, List<DefectFinding> findings) {
+    final colour = _kindColour(kind);
+
+    final meanConfidence =
+        findings.map((f) => f.confidence).reduce((a, b) => a + b) /
+            findings.length;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: colour.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: colour.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(color: colour, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            "${kind.label} × ${findings.length}",
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 13,
+              color: colour,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            "avg ${(meanConfidence * 100).round()}%",
+            style: TextStyle(
+              fontSize: 12,
+              color: colour.withValues(alpha: 0.85),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

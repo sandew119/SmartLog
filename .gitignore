@@ -49,6 +49,8 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
-# The trained model itself. ~50MB of binary that changes wholesale on
-# every retrain, so it is distributed alongside the repo rather than in it.
+# The trained defect model, best.tflite, is committed on purpose -- see the
+# comment beside it in pubspec.yaml. Anything else dropped in assets/models/
+# (an alternate export, a scratch download) stays out of git by default.
 assets/models/*.tflite
+!assets/models/best.tflite
