@@ -1,3 +1,5 @@
+import 'package:intl/intl.dart';
+
 /// Formats measurements the way the people using them read them.
 ///
 /// The app calculates in decimal feet and decimal inches because that is what
@@ -104,6 +106,15 @@ class UnitDisplay {
   /// as "in" next to a genuine cubic-inch figure is how a reading ends up
   /// wrong by two orders of magnitude, so the word is never abbreviated.
   static String adiAngal(int adi, int angal) => "$adi adi · $angal angal";
+
+  /// Money as it is written on an invoice: `Rs. 54,133.33`. The separators
+  /// matter -- "Rs. 54133.33" makes a buyer count digits.
+  static String rupees(double value, {int decimals = 2}) {
+    if (!value.isFinite) return "—";
+
+    final pattern = decimals <= 0 ? "#,##0" : "#,##0.${"0" * decimals}";
+    return "Rs. ${NumberFormat(pattern, "en_US").format(value)}";
+  }
 
   /// A tolerance as a plus-or-minus band in both systems.
   static String tolerance(double inches) {

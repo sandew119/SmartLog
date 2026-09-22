@@ -1,71 +1,78 @@
-import 'dart:io';
-import 'dart:typed_data';
-import 'dart:ui' as ui;
+import 'dart:async';
 
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
-import 'package:image/image.dart' as img;
+import 'package:flutter/services.dart';
 
 import '../database/local_db.dart';
 import '../models/log_defect.dart';
 import '../models/log_face_outline.dart';
 import '../models/sawing_models.dart';
 import '../painters/defect_overlay_painter.dart';
-import '../services/defect_detector.dart';
+import '../services/defect_advisor.dart';
 import '../services/defect_impact.dart';
-import '../services/diagnostics_service.dart';
+import '../services/defect_scan_controller.dart';
+import '../theme/app_theme.dart';
 import '../utils/image_quality.dart';
+import '../utils/unit_display.dart';
 import '../widgets/image_source_sheet.dart';
+import '../widgets/scan_widgets.dart';
+import '../widgets/ui_kit.dart';
+import 'log_report_builder_screen.dart';
 
-/// Decoding a phone photograph takes long enough to drop frames, so it and
-/// the quality measurement happen off the UI thread.
-class _PreparedImage {
-  final img.Image image;
-  final ImageQuality quality;
+/// Inputs for measuring what the confirmed defects cost, off the UI thread.
+class _ImpactRequest {
+  final LogFaceOutline outline;
+  final List<LogDefect> defects;
+  final SawingSetup setup;
 
-  const _PreparedImage(this.image, this.quality);
+  const _ImpactRequest(this.outline, this.defects, this.setup);
 }
 
-_PreparedImage? _prepare(Uint8ListWrapper request) {
-  final raw = img.decodeImage(request.bytes);
-  if (raw == null) return null;
+List<DefectImpact> _impactInBackground(_ImpactRequest request) =>
+    const DefectImpactAnalyser().analyse(
+      outline: request.outline,
+      defects: request.defects,
+      setup: request.setup,
+    );
 
-  // Phone cameras write pixels sideways with an EXIF tag saying how to turn
-  // them. Flutter honours the tag; the image package does not. Without
-  // baking it in, a portrait photo is analysed rotated.
-  final decoded = img.bakeOrientation(raw);
-
-  return _PreparedImage(decoded, ImageQualityChecker.assess(decoded));
-}
-
-/// Wrapper so the isolate payload is one object.
-class Uint8ListWrapper {
-  final Uint8List bytes;
-  const Uint8ListWrapper(this.bytes);
-}
-
-/// Finds and explains surface defects on a log.
+/// Finds, explains and lets a person correct the defects on a log.
 ///
-/// The screen is built so the model is the only missing piece: capture,
-/// quality gating, overlay, severity, impact and persistence all work today
-/// and are exercised by the defects a user marks by hand. When the trained
-/// network is installed it slots in behind [DefectDetector] and nothing
-/// here changes.
+/// Three things changed from the first version, each because it was
+/// misleading someone:
+///
+/// - **The count matches the photo.** It used to count only findings above
+///   the 60% line while the photo boxed everything, so the two disagreed.
+///   Now every finding is shown, counted and numbered; faint ones are marked
+///   "check by eye" instead of being silently left out of the total.
+/// - **No percentages.** A number like "47%" invited a question nobody in a
+///   yard can answer. Certainty is shown as a solid or dashed outline and a
+///   plain word.
+/// - **A person has the last word.** Any finding can be confirmed or
+///   dismissed, and the count, grade and suggestions follow immediately.
 class DefectDetectionScreen extends StatefulWidget {
   /// The traced face, when the user arrived from the cutting flow. With it,
-  /// the screen can say what a defect costs in board volume; without it, it
-  /// can only say what the defect is.
+  /// the screen can say what a defect costs in board volume.
   final LogFaceOutline? outline;
   final SawingSetup? setup;
 
   /// The log these findings belong to, when there is one to attach them to.
   final int? logId;
 
+  /// An existing scan to review -- the Log Report builder passes its own, so
+  /// decisions made here flow straight into the report.
+  final DefectScanController? controller;
+
+  /// Review an existing scan only: no new photo, no report shortcut.
+  final bool reviewOnly;
+
   const DefectDetectionScreen({
     super.key,
     this.outline,
     this.setup,
     this.logId,
+    this.controller,
+    this.reviewOnly = false,
   });
 
   @override
@@ -73,183 +80,164 @@ class DefectDetectionScreen extends StatefulWidget {
 }
 
 class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
-  File? _file;
-  ui.Image? _photo;
-  Size? _imageSize;
+  late DefectScanController _scan = widget.controller ?? DefectScanController();
 
-  ImageQuality? _quality;
-  DefectAnalysis? _analysis;
+  bool get _ownsController => widget.controller == null;
+
   List<DefectImpact> _impacts = const [];
 
-  bool _busy = false;
-  bool _showHeatmap = true;
-  String? _error;
+  /// Each impact against the number of the finding it belongs to. Impacts
+  /// are only measured for confirmed findings, so list positions differ.
+  Map<int, DefectImpact> _impactByIndex = const {};
 
-  DefectDetector get _detector => DefectDetection.instance;
+  Timer? _impactDebounce;
+  String _impactKey = "";
 
-  // --- picking and analysing ------------------------------------------------
+  bool _saving = false;
+
+  final _listKey = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+    _scan.addListener(_onScanChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant DefectDetectionScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    // A different scan handed in: follow it, and let go of the old one.
+    if (widget.controller != null && widget.controller != _scan) {
+      _scan.removeListener(_onScanChanged);
+      if (oldWidget.controller == null) _scan.dispose();
+
+      _scan = widget.controller!;
+      _scan.addListener(_onScanChanged);
+      _impactKey = "";
+    }
+  }
+
+  @override
+  void dispose() {
+    _impactDebounce?.cancel();
+    _scan.removeListener(_onScanChanged);
+    if (_ownsController) _scan.dispose();
+    super.dispose();
+  }
+
+  void _onScanChanged() {
+    if (!mounted) return;
+    setState(() {});
+    _scheduleImpact();
+  }
+
+  // --- actions ---------------------------------------------------------------
 
   Future<void> _pick() async {
     final file = await pickImage(
       context,
-      title: "Photograph the log surface",
-      cameraHint: "Fill the frame with the timber, in good light",
+      title: "Photograph the log",
+      cameraHint: "The cut end or the surface — fill the frame, good light",
       galleryHint: "Use a photo you already took of this log",
     );
 
     if (file == null || !mounted) return;
 
+    HapticFeedback.lightImpact();
     setState(() {
-      _file = file;
-      _photo = null;
-      _analysis = null;
       _impacts = const [];
-      _quality = null;
-      _error = null;
-      _busy = true;
+      _impactByIndex = const {};
+      _impactKey = "";
     });
+    await _scan.scan(file);
 
-    await _analyse(file);
+    if (!mounted || !_scan.hasResult) return;
+
+    HapticFeedback.mediumImpact();
   }
 
-  Future<void> _analyse(File file) async {
-    try {
-      final bytes = await file.readAsBytes();
-
-      final prepared = await compute(_prepare, Uint8ListWrapper(bytes));
-
-      if (!mounted) return;
-
-      if (prepared == null) {
-        setState(() {
-          _busy = false;
-          _error = "That file isn't an image this app can read.";
-        });
-        return;
-      }
-
-      setState(() {
-        _quality = prepared.quality;
-        _imageSize = Size(
-          prepared.image.width.toDouble(),
-          prepared.image.height.toDouble(),
-        );
-      });
-
-      unawaitedLoad(file);
-
-      // Refuse before inference, not after. A model has no way to say "I
-      // cannot see" -- it will return a confident answer for a blurred
-      // photograph of nothing, and a wrong answer about rot is worse than
-      // no answer.
-      if (!prepared.quality.isUsable) {
-        setState(() => _busy = false);
-        return;
-      }
-
-      if (!_detector.isAvailable) {
-        setState(() => _busy = false);
-        return;
-      }
-
-      final analysis = await DiagnosticsService.instance.timed(
-        DiagnosticsService.moduleDefects,
-        () => _detector.analyse(prepared.image),
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        _analysis = analysis;
-        _busy = false;
-      });
-
-      await _measureImpact(analysis, prepared.image);
-    } catch (error) {
-      await DiagnosticsService.instance.recordError(
-        module: DiagnosticsService.moduleDefects,
-        error: error,
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        _busy = false;
-        // The raw exception goes to the diagnostic store, never to the user.
-        _error = "Something went wrong reading that photo. Try another one.";
-      });
-    }
-  }
-
-  /// Loads the photo for painting, through Flutter's own pipeline so the
-  /// EXIF interpretation matches what the overlay is drawn against.
-  void unawaitedLoad(File file) {
-    final stream = FileImage(file).resolve(const ImageConfiguration());
-
-    late final ImageStreamListener listener;
-
-    listener = ImageStreamListener(
-      (info, _) {
-        stream.removeListener(listener);
-        if (!mounted) return;
-        setState(() => _photo = info.image);
-      },
-      onError: (_, __) => stream.removeListener(listener),
-    );
-
-    stream.addListener(listener);
-  }
-
-  /// What each finding costs, when there is a traced face to measure against.
-  Future<void> _measureImpact(DefectAnalysis analysis, img.Image image) async {
+  /// Re-measures the cost of the confirmed defects whenever the set of them
+  /// changes. Debounced: tapping through five findings should not start five
+  /// sawing searches.
+  void _scheduleImpact() {
     final outline = widget.outline;
     final setup = widget.setup;
+    final size = _scan.imageSize;
 
-    if (outline == null || setup == null) return;
-    if (analysis.actionable.isEmpty) return;
+    if (outline == null || setup == null || size == null) return;
 
-    // Findings are in image pixels; the outline is in millimetres. Scale by
-    // the ratio of their widths, which is exact because both describe the
-    // same face.
-    final scale = image.width <= 0 ? 1.0 : outline.bounds.width / image.width;
-
-    final defects = [
-      for (final finding in analysis.actionable)
-        finding.toDefect().scaled(scale),
+    final defects = _scan.confirmedDefects;
+    final indices = [
+      for (final f in _scan.findings)
+        if (f.review == FindingReview.confirmed) f.number - 1,
     ];
+    final key = defects.map((d) => "${d.centre}${d.radius}").join("|");
 
-    final impacts = const DefectImpactAnalyser().analyse(
-      outline: outline,
-      defects: defects,
-      setup: setup,
-    );
+    if (key == _impactKey) return;
+    _impactKey = key;
 
-    if (!mounted) return;
-    setState(() => _impacts = impacts);
+    _impactDebounce?.cancel();
+
+    if (defects.isEmpty) {
+      setState(() {
+        _impacts = const [];
+        _impactByIndex = const {};
+      });
+      return;
+    }
+
+    _impactDebounce = Timer(const Duration(milliseconds: 350), () async {
+      // Findings are in photo pixels; the outline is in millimetres. Scale by
+      // the ratio of their widths, which is exact because both describe the
+      // same face.
+      final scale = size.width <= 0 ? 1.0 : outline.bounds.width / size.width;
+
+      final impacts = await compute(
+        _impactInBackground,
+        _ImpactRequest(
+          outline,
+          [for (final d in defects) d.scaled(scale)],
+          setup,
+        ),
+      );
+
+      if (!mounted || key != _impactKey) return;
+      setState(() {
+        _impacts = impacts;
+        _impactByIndex = {
+          for (var k = 0; k < impacts.length && k < indices.length; k++)
+            indices[k]: impacts[k],
+        };
+      });
+    });
   }
 
   Future<void> _save() async {
-    final analysis = _analysis;
     final logId = widget.logId;
+    if (logId == null) return;
 
-    if (analysis == null || logId == null) return;
+    final confirmed = [
+      for (final f in _scan.findings)
+        if (f.review == FindingReview.confirmed) f,
+    ];
 
-    setState(() => _busy = true);
+    if (confirmed.isEmpty) return;
+
+    setState(() => _saving = true);
 
     try {
-      for (var i = 0; i < analysis.actionable.length; i++) {
-        final finding = analysis.actionable[i];
-
+      for (final f in confirmed) {
         await LocalDB.saveDefect(
           logId: logId,
-          kind: finding.kind.name,
-          confidence: finding.confidence,
+          kind: f.finding.kind.name,
+          confidence: f.finding.confidence,
           automatic: true,
-          centreX: finding.region.center.dx,
-          centreY: finding.region.center.dy,
-          radius: finding.region.longestSide / 2,
-          imagePath: _file?.path,
-          severity: i < _impacts.length ? _impacts[i].severity.stored : null,
+          centreX: f.finding.region.center.dx,
+          centreY: f.finding.region.center.dy,
+          radius: f.finding.region.longestSide / 2,
+          imagePath: _scan.file?.path,
+          severity: _impactByIndex[f.number - 1]?.severity.stored,
         );
       }
 
@@ -258,83 +246,204 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            "Saved ${analysis.actionable.length} defect"
-            "${analysis.actionable.length == 1 ? '' : 's'} to this log.",
+            "Saved ${confirmed.length} defect"
+            "${confirmed.length == 1 ? '' : 's'} to this log.",
           ),
         ),
       );
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => _saving = false);
     }
   }
 
-  // --- UI -------------------------------------------------------------------
-
-  Widget _emptyState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.center_focus_weak, size: 72, color: Colors.grey),
-            const SizedBox(height: 20),
-            const Text(
-              "Check a log for defects",
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              "Take a photo of the cut face or the surface, or pick one you "
-              "already have. Fill the frame with timber and use good light.",
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey),
-            ),
-            const SizedBox(height: 24),
-            SizedBox(
-              height: 52,
-              child: FilledButton.icon(
-                onPressed: _pick,
-                icon: const Icon(Icons.add_a_photo),
-                label: const Text("Add a photo"),
-              ),
-            ),
-            const SizedBox(height: 20),
-            _modelBadge(),
-          ],
+  void _openReport() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LogReportBuilderScreen(
+          initialPhoto: _scan.file,
+          scan: _scan,
         ),
       ),
     );
   }
 
-  /// Says plainly what is running. "It found nothing" and "nothing is
-  /// looking" must never look the same.
-  Widget _modelBadge() {
-    final available = _detector.isAvailable;
+  // --- build -----------------------------------------------------------------
 
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color:
-            (available ? Colors.green : Colors.orange).withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(12),
+  @override
+  Widget build(BuildContext context) {
+    final hasFile = _scan.file != null;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.reviewOnly ? "Review defects" : "Defect Detection"),
+        actions: [
+          if (hasFile && !widget.reviewOnly)
+            IconButton(
+              tooltip: "Scan another photo",
+              onPressed: _scan.isBusy ? null : _pick,
+              icon: const Icon(Icons.add_a_photo_outlined),
+            ),
+        ],
       ),
+      body: hasFile ? _results() : _emptyState(),
+      bottomNavigationBar: widget.reviewOnly ? _reviewDoneBar() : null,
+    );
+  }
+
+  Widget _reviewDoneBar() {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        child: PrimaryAction(
+          label: "Done",
+          icon: Icons.check_rounded,
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
+    );
+  }
+
+  // --- empty -----------------------------------------------------------------
+
+  Widget _emptyState() {
+    final available = _scan.detector.isAvailable;
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
+      children: [
+        FadeSlideIn(
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(22, 26, 22, 24),
+            decoration: BoxDecoration(
+              gradient: AppTheme.brandGradient,
+              borderRadius: BorderRadius.circular(AppTheme.radiusLarge + 4),
+              boxShadow: AppTheme.softShadow,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: const Icon(
+                    Icons.center_focus_strong_rounded,
+                    color: Colors.white,
+                    size: 30,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                const Text(
+                  "See every defect\nbefore you saw",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 26,
+                    height: 1.15,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.6,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  "Photograph a log and SmartLog finds cracks, holes and "
+                  "knots, grades the face, and tells you what to do about "
+                  "each one.",
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.78),
+                    fontSize: 14,
+                    height: 1.45,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                const Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _DarkChip(icon: Icons.bolt_rounded, text: "Cracks"),
+                    _DarkChip(icon: Icons.circle_outlined, text: "Holes"),
+                    _DarkChip(icon: Icons.blur_circular, text: "Knots"),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 18),
+        FadeSlideIn(
+          delay: const Duration(milliseconds: 80),
+          child: SurfaceCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  "For the best scan",
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 12),
+                _tip(Icons.crop_free_rounded, "Fill the frame with timber"),
+                _tip(Icons.wb_sunny_outlined, "Even daylight, no hard shadow"),
+                _tip(
+                    Icons.back_hand_outlined, "Hold still — sharp beats close"),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 22),
+        FadeSlideIn(
+          delay: const Duration(milliseconds: 140),
+          child: PrimaryAction(
+            label: "Take or choose a photo",
+            icon: Icons.add_a_photo_rounded,
+            onPressed: _pick,
+          ),
+        ),
+        const SizedBox(height: 14),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              available ? Icons.memory_rounded : Icons.info_outline_rounded,
+              size: 15,
+              color: available ? AppTheme.primaryBright : AppTheme.warning,
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                available
+                    ? "On-device AI · works offline"
+                    : "No detection model installed — mark defects by hand "
+                        "while tracing the face.",
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: AppTheme.textSecondary,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _tip(IconData icon, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: [
-          Icon(
-            available ? Icons.memory : Icons.info_outline,
-            size: 18,
-            color: available ? Colors.green : Colors.orange,
-          ),
-          const SizedBox(width: 10),
+          IconBadge(icon: icon, size: 32),
+          const SizedBox(width: 12),
           Expanded(
             child: Text(
-              available
-                  ? "Model: ${_detector.name}"
-                  : "No detection model is installed yet. You can still "
-                      "photograph a log and mark defects by hand while "
-                      "tracing the face.",
-              style: const TextStyle(fontSize: 11.5),
+              text,
+              style: const TextStyle(
+                fontSize: 13.5,
+                color: AppTheme.textPrimary,
+              ),
             ),
           ),
         ],
@@ -342,40 +451,120 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
     );
   }
 
+  // --- results ---------------------------------------------------------------
+
+  Widget _results() {
+    final quality = _scan.quality;
+    final done = _scan.phase == ScanPhase.done;
+    final result = _scan.hasResult && done;
+    final findings = _scan.findings;
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
+      children: [
+        _photoCard(),
+        if (_scan.error != null) ...[
+          const SizedBox(height: 16),
+          InfoBanner(
+            icon: Icons.error_outline_rounded,
+            color: AppTheme.error,
+            title: "Couldn't read it",
+            body: _scan.error,
+            action: _retakeButton(),
+          ),
+        ],
+        if (quality != null && !quality.isUsable) ...[
+          const SizedBox(height: 16),
+          _qualityCard(quality),
+        ],
+        if (done &&
+            quality != null &&
+            quality.isUsable &&
+            !_scan.detector.isAvailable) ...[
+          const SizedBox(height: 16),
+          const InfoBanner(
+            icon: Icons.info_outline_rounded,
+            color: AppTheme.warning,
+            title: "No detection model installed",
+            body: "You can still mark defects by hand while tracing the log "
+                "face in Optimal Cutting or a Log Report.",
+          ),
+        ],
+        if (result) ...[
+          const SizedBox(height: 16),
+          FadeSlideIn(child: _summaryCard()),
+          if (findings.isNotEmpty) ...[
+            SectionHeader(
+              key: _listKey,
+              eyebrow: "Findings",
+              title: "What the scan found",
+              subtitle: "Tap one to see it on the photo. Correct anything "
+                  "the scan got wrong.",
+            ),
+            for (var i = 0; i < findings.length; i++)
+              FadeSlideIn(
+                delay: Duration(milliseconds: 40 * i.clamp(0, 6)),
+                child: _findingCard(i, findings[i]),
+              ),
+          ],
+          if (_impacts.isNotEmpty) _impactSection(),
+          _adviceSection(),
+          _actions(),
+        ],
+      ],
+    );
+  }
+
+  Widget _retakeButton() {
+    return OutlinedButton.icon(
+      onPressed: _pick,
+      icon: const Icon(Icons.refresh_rounded, size: 18),
+      label: const Text("Try another photo"),
+    );
+  }
+
   Widget _photoCard() {
-    final photo = _photo;
-    final size = _imageSize;
+    final photo = _scan.photo;
+    final size = _scan.imageSize;
 
-    if (photo == null || size == null) {
-      return const AspectRatio(
-        aspectRatio: 4 / 3,
-        child: ColoredBox(
-          color: Colors.black12,
-          child: Center(child: CircularProgressIndicator()),
-        ),
-      );
-    }
+    final caption = switch (_scan.phase) {
+      ScanPhase.preparing => "Checking the photo…",
+      ScanPhase.scanning => _scan.passesTotal > 1
+          ? "Scanning region ${(_scan.progress * _scan.passesTotal).floor().clamp(1, _scan.passesTotal)} of ${_scan.passesTotal}…"
+          : "Scanning…",
+      _ => "",
+    };
 
-    final analysis = _analysis;
+    final aspect =
+        size == null ? 4 / 3 : (size.width / size.height).clamp(0.62, 1.8);
 
     return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: AspectRatio(
-        aspectRatio: (size.width / size.height).clamp(0.6, 1.9),
-        child: InteractiveViewer(
-          maxScale: 5,
-          child: CustomPaint(
-            size: Size.infinite,
-            painter: DefectOverlayPainter(
-              photo: photo,
-              imageSize: size,
-              findings: analysis?.findings ?? const [],
-              severities: [for (final i in _impacts) i.severity],
-              activation: analysis?.activation,
-              activationWidth: analysis?.activationWidth ?? 0,
-              activationHeight: analysis?.activationHeight ?? 0,
-              showHeatmap: _showHeatmap,
-            ),
+      borderRadius: BorderRadius.circular(AppTheme.radiusLarge),
+      child: ColoredBox(
+        color: const Color(0xFF101512),
+        child: AspectRatio(
+          aspectRatio: aspect,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (photo != null && size != null)
+                InteractiveViewer(
+                  maxScale: 5,
+                  child: CustomPaint(
+                    size: Size.infinite,
+                    painter: DefectOverlayPainter(
+                      photo: photo,
+                      imageSize: size,
+                      marks: _scan.marks(),
+                      faceCentre: _scan.faceCentre,
+                      faceRadius: _scan.faceRadius,
+                    ),
+                  ),
+                )
+              else if (_scan.file != null)
+                Image.file(_scan.file!, fit: BoxFit.contain),
+              if (_scan.isBusy) ScanSweep(caption: caption),
+            ],
           ),
         ),
       ),
@@ -383,233 +572,322 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
   }
 
   Widget _qualityCard(ImageQuality quality) {
-    return Container(
-      margin: const EdgeInsets.only(top: 16),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.orange.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
-      ),
+    return InfoBanner(
+      icon: Icons.photo_camera_outlined,
+      color: AppTheme.warning,
+      title: "This photo can't be read reliably",
+      body: quality.message,
+      action: _retakeButton(),
+    );
+  }
+
+  Widget _summaryCard() {
+    final count = _scan.count;
+    final pending = _scan.pendingCount;
+    final grade = _scan.grade;
+    final breakdown = _scan.breakdown;
+
+    if (count == 0) {
+      return SurfaceCard(
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          children: [
+            GradeBadge(grade: grade.grade, size: 58),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "No defects found",
+                    style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _scan.dismissedCount > 0
+                        ? "Everything the scan marked was dismissed by you."
+                        : "The scan checked "
+                            "${_scan.analysis?.passes == 1 ? 'this photo' : 'every part of this photo'} "
+                            "and found nothing wrong.",
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: AppTheme.textSecondary,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return SurfaceCard(
+      padding: const EdgeInsets.all(18),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.warning_amber, color: Colors.orange),
-              const SizedBox(width: 10),
-              const Expanded(
-                child: Text(
-                  "This photo can't be read reliably",
-                  style: TextStyle(fontWeight: FontWeight.bold),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        TweenAnimationBuilder<double>(
+                          tween: Tween(begin: 0, end: count.toDouble()),
+                          duration: const Duration(milliseconds: 500),
+                          curve: Curves.easeOutCubic,
+                          builder: (context, value, _) => Text(
+                            "${value.round()}",
+                            style: const TextStyle(
+                              fontSize: 44,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: -1.5,
+                              height: 1,
+                              color: AppTheme.textPrimary,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          count == 1 ? "defect found" : "defects found",
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: AppTheme.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final entry in breakdown)
+                          Pill(
+                            text:
+                                "${entry.count} ${_plural(entry.label, entry.count)}",
+                            color:
+                                DefectOverlayPainter.colourForKind(entry.kind),
+                            dot: true,
+                          ),
+                      ],
+                    ),
+                  ],
                 ),
+              ),
+              const SizedBox(width: 12),
+              GradeBadge(grade: grade.grade, size: 58),
+            ],
+          ),
+          const SizedBox(height: 14),
+          const Divider(),
+          const SizedBox(height: 12),
+          Text(
+            grade.grade.meaning,
+            style: const TextStyle(
+              fontSize: 13,
+              height: 1.4,
+              color: AppTheme.textPrimary,
+            ),
+          ),
+          if (grade.reasons.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              grade.reasons.join("  ·  "),
+              style:
+                  const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+            ),
+          ],
+          if (pending > 0) ...[
+            const SizedBox(height: 12),
+            Pill(
+              icon: Icons.visibility_outlined,
+              text: "$pending to check by eye — the grade may change",
+              color: AppTheme.accent,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static String _plural(String label, int count) {
+    if (count == 1) return label;
+    if (label.endsWith("s")) return label;
+    return "${label}s";
+  }
+
+  Widget _findingCard(int index, ReviewedFinding item) {
+    final finding = item.finding;
+    final colour = DefectOverlayPainter.colourForKind(finding.kind);
+    final dismissed = item.review == FindingReview.dismissed;
+    final pending = item.review == FindingReview.pending;
+    final selected = _scan.selected == index;
+
+    final zone = item.assessed.zone;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 200),
+        opacity: dismissed ? 0.55 : 1,
+        child: SurfaceCard(
+          shadow: selected,
+          border: BorderSide(
+            color: selected ? colour : AppTheme.line,
+            width: selected ? 1.6 : 1,
+          ),
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+          onTap: () => _scan.select(index),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 30,
+                    height: 30,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: dismissed ? AppTheme.surfaceMuted : colour,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      "${item.number}",
+                      style: TextStyle(
+                        color: dismissed ? AppTheme.textTertiary : Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      finding.displayLabel,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        decoration:
+                            dismissed ? TextDecoration.lineThrough : null,
+                      ),
+                    ),
+                  ),
+                  if (dismissed)
+                    const Pill(text: "Dismissed", color: AppTheme.textTertiary)
+                  else if (pending)
+                    const Pill(
+                      text: "Check by eye",
+                      color: AppTheme.accent,
+                      icon: Icons.visibility_outlined,
+                    )
+                  else
+                    Pill(
+                      text: finding.isConfident ? "Clear" : "Confirmed",
+                      color: AppTheme.primaryBright,
+                      icon: Icons.check_rounded,
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                kindMeaning(finding.kind),
+                style: const TextStyle(
+                  fontSize: 13,
+                  height: 1.4,
+                  color: AppTheme.textSecondary,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  _metaChip(
+                      Icons.straighten_rounded, sizeWord(item.assessed.extent)),
+                  if (zone != DefectZone.unknown)
+                    _metaChip(Icons.adjust_rounded, zone.label),
+                  if (_impactByIndex[index] != null && !dismissed)
+                    _metaChip(
+                      Icons.warning_amber_rounded,
+                      "${_impactByIndex[index]!.severity.label} severity",
+                    ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              // A Wrap, not a Row: on a narrow phone with large text the two
+              // buttons must drop to a second line rather than overflow.
+              Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 4,
+                runSpacing: 4,
+                children: [
+                  if (dismissed)
+                    TextButton.icon(
+                      onPressed: () => _scan.restore(index),
+                      icon: const Icon(Icons.undo_rounded, size: 18),
+                      label: const Text("Undo"),
+                    )
+                  else ...[
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        foregroundColor: AppTheme.textSecondary,
+                      ),
+                      onPressed: () {
+                        HapticFeedback.selectionClick();
+                        _scan.dismiss(index);
+                      },
+                      child: const Text("Not a defect"),
+                    ),
+                    if (pending)
+                      FilledButton.tonalIcon(
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size(0, 40),
+                        ),
+                        onPressed: () {
+                          HapticFeedback.selectionClick();
+                          _scan.confirm(index);
+                        },
+                        icon: const Icon(Icons.check_rounded, size: 18),
+                        label: const Text("Confirm"),
+                      ),
+                  ],
+                ],
               ),
             ],
           ),
-          const SizedBox(height: 6),
-          Text(quality.message!, style: const TextStyle(fontSize: 12.5)),
-          const SizedBox(height: 10),
-          Text(
-            "Sharpness ${quality.sharpness.toStringAsFixed(0)} · "
-            "Brightness ${quality.brightness.toStringAsFixed(0)} · "
-            "${quality.width}×${quality.height}",
-            style: const TextStyle(fontSize: 11, color: Colors.grey),
-          ),
-          const SizedBox(height: 10),
-          OutlinedButton.icon(
-            onPressed: _pick,
-            icon: const Icon(Icons.refresh, size: 18),
-            label: const Text("Take another"),
-          ),
-        ],
+        ),
       ),
     );
   }
 
-  Widget _resultCard(DefectAnalysis analysis) {
-    if (analysis.isClean) {
-      return _banner(
-        Icons.check_circle,
-        Colors.green,
-        "No defects found",
-        "The model checked this surface and found nothing wrong with it."
-            "${_scoreFootnote(analysis)}",
-      );
-    }
-
-    if (analysis.isUncertain) {
-      return _banner(
-        Icons.help_outline,
-        Colors.orange,
-        "Not sure enough to say",
-        "Everything the model saw scored below "
-            "${(DefectFinding.confidenceThreshold * 100).round()}%, so "
-            "nothing is being acted on. Check the face by eye, and mark "
-            "anything you find while tracing it."
-            "${_scoreFootnote(analysis)}",
-      );
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _summaryStrip(analysis.actionable, _impacts),
-        if (_impacts.isNotEmpty)
-          _banner(
-            Icons.summarize,
-            Colors.brown,
-            "What this costs",
-            DefectImpactAnalyser.summarise(_impacts),
-          ),
-        const SizedBox(height: 8),
-        for (var i = 0; i < analysis.actionable.length; i++)
-          _findingCard(
-            analysis.actionable[i],
-            i < _impacts.length ? _impacts[i] : null,
-          ),
-      ],
-    );
-  }
-
-  /// What the model's own numbers were, appended to a message that would
-  /// otherwise say "nothing" with no way to tell a genuinely clean surface
-  /// from a model that barely looked. Empty when there is nothing to show --
-  /// an unavailable detector reports no scores at all.
-  String _scoreFootnote(DefectAnalysis analysis) {
-    if (analysis.scores.isEmpty) return "";
-
-    final ordered = analysis.scores.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-
-    final parts = [
-      for (final e in ordered) "${e.key} ${(e.value * 100).round()}%",
-    ];
-
-    return "\n\nWhat it saw: ${parts.join(', ')}.";
-  }
-
-  /// One pill per kind of defect found, before the individual cards --
-  /// "how many, of what, how much wood it costs" at a glance, for someone
-  /// who wants the headline before reading every box.
-  Widget _summaryStrip(List<DefectFinding> findings, List<DefectImpact> impacts) {
-    final byKind = <LogDefectKind, List<(DefectFinding, DefectImpact?)>>{};
-    for (var i = 0; i < findings.length; i++) {
-      final impact = i < impacts.length ? impacts[i] : null;
-      byKind.putIfAbsent(findings[i].kind, () => []).add((findings[i], impact));
-    }
-
-    final kinds = byKind.keys.toList()
-      ..sort((a, b) => b.severity.compareTo(a.severity));
-
+  Widget _metaChip(IconData icon, String text) {
     return Container(
-      margin: const EdgeInsets.only(top: 16),
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.03),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            "Found ${findings.length} defect"
-            "${findings.length == 1 ? '' : 's'}",
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-          ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final kind in kinds) _kindPill(kind, byKind[kind]!),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// A colour by how serious the kind is on its own, independent of any one
-  /// finding's size or position -- this is shown before the per-finding
-  /// impact analysis has necessarily run, or when there is no traced face
-  /// for it to run against at all.
-  static Color _kindColour(LogDefectKind kind) {
-    if (kind.severity >= 0.9) return DefectOverlayPainter.colourFor(DefectSeverity.high);
-    if (kind.severity >= 0.6) return DefectOverlayPainter.colourFor(DefectSeverity.medium);
-    return DefectOverlayPainter.colourFor(DefectSeverity.low);
-  }
-
-  /// Share of the wood one finding costs -- the real measurement against the
-  /// traced face when there is one, otherwise the finding's own box against
-  /// the photo frame. The empty-state hint already tells the user to fill
-  /// the frame with timber, so the frame is a reasonable stand-in for "the
-  /// wood" when there is no traced outline to measure against exactly; it is
-  /// labelled differently below so the two are never confused for each
-  /// other.
-  double _coverageFraction(DefectFinding finding, DefectImpact? impact) {
-    if (impact != null) return impact.faceFraction;
-
-    final size = _imageSize;
-    if (size == null || size.width <= 0 || size.height <= 0) return 0;
-
-    final boxArea = finding.region.width * finding.region.height;
-    final frameArea = size.width * size.height;
-    if (frameArea <= 0) return 0;
-
-    return (boxArea / frameArea).clamp(0.0, 1.0);
-  }
-
-  Widget _kindPill(LogDefectKind kind, List<(DefectFinding, DefectImpact?)> items) {
-    final colour = _kindColour(kind);
-
-    // The model's own word for this, not the app's internal vocabulary --
-    // the two agree for a knot and a crack, but the app's "Hole" finding is
-    // stored under the same kind as a rotten hollow core, whose display name
-    // is "Hollow". Showing the raw label is what makes it say "Hole".
-    final label = items.first.$1.rawLabel;
-
-    // How much wood this kind costs, not how sure the model was that it is
-    // there -- confidence is shown per finding below. Summed rather than
-    // averaged: two cracks each covering 2% of the face cost 4% of it
-    // between them, not 2%.
-    final measured = items.any((it) => it.$2 != null);
-    final totalCoverage = items.fold<double>(
-      0,
-      (sum, it) => sum + _coverageFraction(it.$1, it.$2),
-    );
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: colour.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: colour.withValues(alpha: 0.5)),
+        color: AppTheme.surfaceMuted,
+        borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: colour, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 8),
+          Icon(icon, size: 13, color: AppTheme.textSecondary),
+          const SizedBox(width: 5),
           Text(
-            "$label × ${items.length}",
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 13,
-              color: colour,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            measured
-                ? "${(totalCoverage * 100).toStringAsFixed(1)}% of the face"
-                : "~${(totalCoverage * 100).toStringAsFixed(1)}% of frame",
-            style: TextStyle(
+            text,
+            style: const TextStyle(
               fontSize: 12,
-              color: colour.withValues(alpha: 0.85),
+              fontWeight: FontWeight.w600,
+              color: AppTheme.textSecondary,
             ),
           ),
         ],
@@ -617,242 +895,151 @@ class _DefectDetectionScreenState extends State<DefectDetectionScreen> {
     );
   }
 
-  Widget _banner(IconData icon, Color colour, String title, String body) {
-    return Container(
-      margin: const EdgeInsets.only(top: 16),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: colour.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: colour),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title,
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-                const SizedBox(height: 4),
-                Text(body, style: const TextStyle(fontSize: 12.5)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget _impactSection() {
+    final lost = _impacts.fold<double>(0, (s, i) => s + i.lostCubicFeet);
+    final value = _impacts.fold<double>(0, (s, i) => s + i.lostValue);
 
-  Widget _findingCard(DefectFinding finding, DefectImpact? impact) {
-    final severity = impact?.severity ?? DefectSeverity.medium;
-    final colour = DefectOverlayPainter.colourFor(severity);
-
-    return Container(
-      margin: const EdgeInsets.only(top: 12),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.grey.shade300),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 12,
-                height: 12,
-                decoration: BoxDecoration(
-                  color: colour,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  finding.rawLabel,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                  ),
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: colour.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  "${severity.label} severity",
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: colour,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          _confidenceBar(finding.confidence),
-          if (impact != null) ...[
-            const SizedBox(height: 12),
-            Text(impact.explanation, style: const TextStyle(fontSize: 12.5)),
-            const SizedBox(height: 8),
-            Text(
-              "Covers ${(impact.faceFraction * 100).toStringAsFixed(1)}% of "
-              "the cut face",
-              style: const TextStyle(fontSize: 11, color: Colors.grey),
-            ),
-          ] else ...[
-            const SizedBox(height: 10),
-            Text(
-              finding.toDefect().isDisqualifying
-                  ? "No board can cross this — it is wood that isn't there."
-                  : "A board containing this is still sellable, at a lower "
-                      "grade.",
-              style: const TextStyle(fontSize: 12.5),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              "Trace the log face in the cutting flow to see what it costs "
-              "in boards.",
-              style: TextStyle(fontSize: 11, color: Colors.grey),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  /// The confidence, shown as a bar with the acting threshold marked.
-  ///
-  /// A bare percentage does not tell anyone whether the app will act on it.
-  Widget _confidenceBar(double confidence) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const Text("Confidence", style: TextStyle(fontSize: 11.5)),
-            const Spacer(),
-            Text(
-              "${(confidence * 100).toStringAsFixed(0)}%",
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 5),
-        LayoutBuilder(
-          builder: (context, constraints) => Stack(
+        const SectionHeader(eyebrow: "Impact", title: "What they cost"),
+        SurfaceCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: confidence,
-                  minHeight: 7,
-                  backgroundColor: Colors.grey.shade300,
-                  valueColor: AlwaysStoppedAnimation(
-                    confidence >= DefectFinding.confidenceThreshold
-                        ? Colors.green
-                        : Colors.orange,
+              Row(
+                children: [
+                  Expanded(
+                    child: StatTile(
+                      label: "Boards lost",
+                      value: "${lost.toStringAsFixed(2)} ft³",
+                      icon: Icons.content_cut_rounded,
+                      color: AppTheme.severityHigh,
+                    ),
                   ),
-                ),
+                  if (value > 0)
+                    Expanded(
+                      child: StatTile(
+                        label: "Value lost",
+                        value: UnitDisplay.rupees(value, decimals: 0),
+                        icon: Icons.payments_outlined,
+                        color: AppTheme.accent,
+                      ),
+                    ),
+                ],
               ),
-              Positioned(
-                left: constraints.maxWidth * DefectFinding.confidenceThreshold,
-                child: Container(width: 2, height: 7, color: Colors.black54),
+              const SizedBox(height: 12),
+              Text(
+                DefectImpactAnalyser.summarise(_impacts),
+                style: const TextStyle(
+                  fontSize: 13,
+                  height: 1.4,
+                  color: AppTheme.textSecondary,
+                ),
               ),
             ],
           ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          confidence >= DefectFinding.confidenceThreshold
-              ? "Above the ${(DefectFinding.confidenceThreshold * 100).round()}% "
-                  "line, so cutting plans will route boards around it"
-              : "Below the ${(DefectFinding.confidenceThreshold * 100).round()}% "
-                  "line, so it is reported but not acted on",
-          style: const TextStyle(fontSize: 10.5, color: Colors.grey),
         ),
       ],
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final analysis = _analysis;
-    final quality = _quality;
+  Widget _adviceSection() {
+    final lost = _impacts.fold<double>(0, (s, i) => s + i.lostCubicFeet);
+    final value = _impacts.fold<double>(0, (s, i) => s + i.lostValue);
 
-    return Scaffold(
-      backgroundColor: const Color(0xffF5F7FA),
-      appBar: AppBar(
-        title: const Text("Defect Detection"),
-        centerTitle: true,
-        actions: [
-          if (analysis?.activation != null)
-            IconButton(
-              tooltip: _showHeatmap ? "Hide heatmap" : "Show heatmap",
-              onPressed: () => setState(() => _showHeatmap = !_showHeatmap),
-              icon: Icon(
-                _showHeatmap ? Icons.blur_on : Icons.blur_off,
-              ),
+    final advice = _scan.advice(
+      lostCubicFeet: lost,
+      lostValue: value,
+      hasTracedFace: widget.outline != null,
+    );
+
+    if (advice.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SectionHeader(
+          eyebrow: "Suggestions",
+          title: "What to do about it",
+        ),
+        for (var i = 0; i < advice.length; i++)
+          FadeSlideIn(
+            delay: Duration(milliseconds: 50 * i.clamp(0, 5)),
+            child: AdviceCard(advice: advice[i]),
+          ),
+      ],
+    );
+  }
+
+  Widget _actions() {
+    final confirmedCount =
+        _scan.findings.where((f) => f.review == FindingReview.confirmed).length;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 20),
+      child: Column(
+        children: [
+          if (widget.logId != null && confirmedCount > 0) ...[
+            PrimaryAction(
+              label: "Save $confirmedCount to this log",
+              icon: Icons.save_alt_rounded,
+              busy: _saving,
+              onPressed: _save,
             ),
-          if (_file != null)
-            IconButton(
-              tooltip: "Another photo",
+            const SizedBox(height: 12),
+          ],
+          if (!widget.reviewOnly) ...[
+            PrimaryAction(
+              label: "Build a full Log Report",
+              icon: Icons.description_outlined,
+              outlined: widget.logId != null && confirmedCount > 0,
+              onPressed: _openReport,
+            ),
+            const SizedBox(height: 12),
+            PrimaryAction(
+              label: "Scan another photo",
+              icon: Icons.add_a_photo_outlined,
+              outlined: true,
               onPressed: _pick,
-              icon: const Icon(Icons.add_a_photo),
             ),
+          ],
         ],
       ),
-      body: _file == null
-          ? _emptyState()
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _photoCard(),
-                if (_busy)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 20),
-                    child: Center(child: CircularProgressIndicator()),
-                  ),
-                if (_error != null)
-                  _banner(Icons.error_outline, Colors.red, "Couldn't read it",
-                      _error!),
-                if (quality != null && !quality.isUsable) _qualityCard(quality),
-                if (!_busy &&
-                    quality != null &&
-                    quality.isUsable &&
-                    !_detector.isAvailable) ...[
-                  const SizedBox(height: 16),
-                  _modelBadge(),
-                ],
-                if (analysis != null) _resultCard(analysis),
-                if (analysis != null &&
-                    analysis.actionable.isNotEmpty &&
-                    widget.logId != null) ...[
-                  const SizedBox(height: 20),
-                  SizedBox(
-                    height: 52,
-                    child: FilledButton.icon(
-                      onPressed: _busy ? null : _save,
-                      icon: const Icon(Icons.save_alt),
-                      label: const Text("Save these to the log"),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 30),
-              ],
+    );
+  }
+}
+
+class _DarkChip extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _DarkChip({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(40),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: const Color(0xFFE8C48F)),
+          const SizedBox(width: 6),
+          Text(
+            text,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
             ),
+          ),
+        ],
+      ),
     );
   }
 }
