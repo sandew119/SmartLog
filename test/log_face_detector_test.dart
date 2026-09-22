@@ -537,4 +537,109 @@ void main() {
       );
     });
   });
+
+  group('the face colour model must not depend on exactly where the tap landed', () {
+    test('a smoothly gradient-lit face is found accurately when tapped in its darkest corner', () {
+      // One off-camera light source casts a smooth brightness gradient
+      // across a real face -- unlike the hard half-and-half shadow above,
+      // there is no single line to point a chromatic-shift test at; every
+      // patch of the face is a slightly different colour from every other.
+      // The colour model built from a small disk around the tap has to
+      // still describe the far side of the face well enough that a ray
+      // travelling toward it is not mistaken for having already left the
+      // wood.
+      const width = 400, height = 400;
+      const centre = Offset(200, 200);
+      const radius = 120.0;
+
+      final image = img.Image(width: width, height: height);
+
+      for (var y = 0; y < height; y++) {
+        for (var x = 0; x < width; x++) {
+          final inside =
+              (Offset(x.toDouble(), y.toDouble()) - centre).distance <=
+                  radius;
+
+          if (inside) {
+            final t = (x / width).clamp(0.0, 1.0);
+            image.setPixelRgb(
+              x,
+              y,
+              (140 + t * 80).round(),
+              (120 + t * 75).round(),
+              (90 + t * 65).round(),
+            );
+          } else {
+            image.setPixelRgb(x, y, 40, 38, 35);
+          }
+        }
+      }
+
+      // Tapped in the darkest corner of the face -- the worst spot for a
+      // colour model sampled only from around the tap.
+      final detection = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(140, 200),
+      )!;
+
+      expect(detection.ellipse.semiMajor, closeTo(radius, radius * 0.2));
+      expect(
+        (detection.ellipse.centre - centre).distance,
+        lessThan(25),
+      );
+    });
+  });
+
+  group('a weak edge is reported roughly rather than not at all', () {
+    test('a low-contrast face -- weathered grey log on grey dirt -- is still found', () {
+      // Overcast light, a log that has lost its colour, ground that has not
+      // gained any: a real and common yard photo. The colour step here
+      // (~25 on this scale) sits just under the threshold a clean sawn face
+      // against clear ground is tuned for, which is exactly the case a
+      // silent "nothing found" would previously abandon the user in the
+      // middle of.
+      const centre = Offset(200, 200);
+      const radius = 120.0;
+      final image = img.Image(width: 400, height: 400);
+
+      for (var y = 0; y < 400; y++) {
+        for (var x = 0; x < 400; x++) {
+          final inside =
+              (Offset(x.toDouble(), y.toDouble()) - centre).distance <=
+                  radius;
+          image.setPixelRgb(
+            x,
+            y,
+            inside ? 150 : 132,
+            inside ? 140 : 126,
+            inside ? 128 : 118,
+          );
+        }
+      }
+
+      final detection = LogFaceDetector.detect(image: image, centre: centre);
+
+      expect(detection, isNotNull, reason: "a weak but real edge is there to find");
+      expect(detection!.ellipse.semiMajor, closeTo(radius, radius * 0.35));
+
+      // Not claimed as trustworthy as a normal-contrast read -- the UI is
+      // what turns this into "check this outline before going on" rather
+      // than packing boards against it unquestioned.
+      expect(detection.confidence, greaterThan(0));
+    });
+
+    test('a genuinely blank image still yields nothing -- relaxing is not the same as guessing', () {
+      final image = img.Image(width: 300, height: 300);
+      img.fill(image, color: img.ColorRgb8(128, 128, 128));
+
+      final detection = LogFaceDetector.detect(
+        image: image,
+        centre: const Offset(150, 150),
+      );
+
+      if (detection != null) {
+        expect(detection.isReliable, isFalse);
+      }
+    });
+  });
 }

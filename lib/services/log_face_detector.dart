@@ -148,26 +148,45 @@ class LogFaceDetector {
     final maxRadius = _maxUsableRadius(work, seed);
     if (maxRadius <= _minRadius + _edgeWindow * 2) return null;
 
-    final hits = <Offset>[];
-    final radii = List<double?>.filled(rayCount, null);
+    var minColourStep = _minColourStep;
+    var minEdgeContrast = _minEdgeContrast;
 
-    for (var i = 0; i < rayCount; i++) {
-      final angle = 2 * math.pi * i / rayCount;
+    var hits = _castRays(
+      colour: blurred,
+      gradient: gradient,
+      face: face,
+      origin: seed,
+      rayCount: rayCount,
+      maxRadius: maxRadius,
+      minColourStep: minColourStep,
+      minEdgeContrast: minEdgeContrast,
+    );
 
-      final r = _findEdgeAlongRay(
+    // A weathered, low-contrast face -- grey timber on pale dirt under flat
+    // overcast light -- can sit entirely under thresholds tuned for a
+    // normal sawn face against clear ground: measured, a face/background
+    // step of 25 on this scale fails outright where 26 is required. Rather
+    // than report nothing, retry once with both thresholds halved. A
+    // rougher outline the user can see and drag into place beats a dead
+    // end with nothing to correct -- the same reasoning the confidence
+    // score already exists for. The relaxed thresholds carry into the
+    // refine pass below too: re-checking a low-contrast photo against the
+    // strict thresholds that had just failed on it would find no agreement
+    // anywhere and report zero confidence in a shape that is, in fact,
+    // reasonably placed.
+    if (hits.length < 8) {
+      minColourStep *= 0.5;
+      minEdgeContrast *= 0.5;
+
+      hits = _castRays(
         colour: blurred,
         gradient: gradient,
         face: face,
         origin: seed,
-        angle: angle,
+        rayCount: rayCount,
         maxRadius: maxRadius,
-      );
-
-      if (r == null) continue;
-
-      radii[i] = r;
-      hits.add(
-        Offset(seed.dx + r * math.cos(angle), seed.dy + r * math.sin(angle)),
+        minColourStep: minColourStep,
+        minEdgeContrast: minEdgeContrast,
       );
     }
 
@@ -195,6 +214,8 @@ class LogFaceDetector {
         origin: ellipse.centre,
         angle: angle,
         maxRadius: _maxUsableRadius(work, ellipse.centre),
+        minColourStep: minColourStep,
+        minEdgeContrast: minEdgeContrast,
       );
 
       if (measured == null || expected <= 0) {
@@ -281,6 +302,47 @@ class LogFaceDetector {
     ].reduce(math.min);
   }
 
+  /// One pass of casting [rayCount] rays from [origin] and collecting where
+  /// each one found the edge, at the given thresholds.
+  ///
+  /// Kept separate from [detect] so a first pass at the normal thresholds
+  /// can be retried at looser ones without duplicating the loop.
+  static List<Offset> _castRays({
+    required img.Image colour,
+    required img.Image gradient,
+    required _FaceColour face,
+    required Offset origin,
+    required int rayCount,
+    required double maxRadius,
+    required double minColourStep,
+    required double minEdgeContrast,
+  }) {
+    final hits = <Offset>[];
+
+    for (var i = 0; i < rayCount; i++) {
+      final angle = 2 * math.pi * i / rayCount;
+
+      final r = _findEdgeAlongRay(
+        colour: colour,
+        gradient: gradient,
+        face: face,
+        origin: origin,
+        angle: angle,
+        maxRadius: maxRadius,
+        minColourStep: minColourStep,
+        minEdgeContrast: minEdgeContrast,
+      );
+
+      if (r == null) continue;
+
+      hits.add(
+        Offset(origin.dx + r * math.cos(angle), origin.dy + r * math.sin(angle)),
+      );
+    }
+
+    return hits;
+  }
+
   /// Walks one ray and returns the radius where the face ends.
   ///
   /// Scores every candidate on how much the colour stops matching the face
@@ -294,6 +356,8 @@ class LogFaceDetector {
     required Offset origin,
     required double angle,
     required double maxRadius,
+    double minColourStep = _minColourStep,
+    double minEdgeContrast = _minEdgeContrast,
   }) {
     final limit = maxRadius.floor();
     if (limit <= _minRadius + _edgeWindow) return null;
@@ -368,7 +432,7 @@ class LogFaceDetector {
       // than the sawn face. That is what keeps growth rings, saw marks and
       // the pith -- all real colour boundaries, all inside the timber --
       // from being mistaken for where the log ends.
-      if (outerDistance < _minColourStep) continue;
+      if (outerDistance < minColourStep) continue;
 
       final change = math.sqrt(
         math.pow(outerR - innerR, 2) +
@@ -376,7 +440,7 @@ class LogFaceDetector {
             math.pow(outerB - innerB, 2),
       );
 
-      if (change < _minEdgeContrast) continue;
+      if (change < minEdgeContrast) continue;
 
       final gx = (origin.dx + dx * r).round().clamp(0, gradient.width - 1);
       final gy = (origin.dy + dy * r).round().clamp(0, gradient.height - 1);
