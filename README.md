@@ -116,7 +116,7 @@ Users can review and adjust the detected log-face outline. The measured girth is
 The application presents cutting arrangements and compares the available cutting strategies, including live sawing and cant sawing.
 
 <p align="center">
-  <img src="assets/app-ui/5.png" alt="Generated Cutting Plan" width="280"/>
+  <img src="assets/app-ui/5.jpeg" alt="Generated Cutting Plan" width="280"/>
 </p>
 
 ### 6. Cutting Details and Reports
