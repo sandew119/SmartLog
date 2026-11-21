@@ -2,7 +2,7 @@
 # SmartLog – Mobile-Based Timber Measurement and Cutting Optimisation System
 
 <p align="center">
-  <img src="assets/app-ui/1.png" alt="SmartLog Home Screen" width="250"/>
+  <img src="assets/images/smartlog-banner.png" alt="SmartLog - Mobile-Based Timber Measurement and Cutting Optimisation System" width="100%"/>
 </p>
 
 <p align="center">
